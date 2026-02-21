@@ -1,0 +1,558 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>io.gravitee.vllm</groupId>
+    <artifactId>vLLM4j</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>vLLM4j</name>
+    <description>
+        JVM native binding for vLLM via jextract and CPython FFM (Foreign Function and Memory API).
+        Embeds CPython in-process, drives LLMEngine synchronously, and exposes Jinja2 chat-template
+        rendering without HTTP, Ray, or AsyncLLMEngine.
+    </description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>25</maven.compiler.release>
+
+        <!-- Python version used for the venv -->
+        <python.version>3.12</python.version>
+
+        <!-- Where jextract lands after download -->
+        <jextract.dir>${project.basedir}/.jextract</jextract.dir>
+        <jextract.bin>${jextract.dir}/bin/jextract</jextract.bin>
+
+        <!-- libpython name passed to jextract via the -l flag -->
+        <libpython.name>python${python.version}</libpython.name>
+
+        <!-- Generated sources output directory -->
+        <generated.sources.dir>${project.build.directory}/generated-sources</generated.sources.dir>
+        <cpython.package>org.vllm.python</cpython.package>
+        <cpython.class>CPython</cpython.class>
+
+        <!-- Exclude integration tests by default -->
+        <surefire.excludedGroups>integration | vlm-integration</surefire.excludedGroups>
+    </properties>
+
+    <!--
+        Platform profiles — two orthogonal axes:
+          1. OS/arch profiles:  handle jextract download + Python.h resolution + jextract run
+          2. Backend profiles:  handle vLLM Python package installation
+
+        Usage:
+          mvn clean package -P macosx-aarch64,metal
+          mvn clean package -P linux-x86_64,cuda
+          mvn clean package -P linux-x86_64,cpu
+
+        The backend profile runs setup-venv.sh during 'initialize' (before generate-sources).
+        The OS/arch profile runs download-jextract.sh during 'validate' and
+        generate-sources.sh during 'generate-sources'.
+    -->
+    <profiles>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             OS/Arch profiles — jextract download + Python.h resolution + codegen
+             ═══════════════════════════════════════════════════════════════════ -->
+
+        <!-- macOS Apple Silicon -->
+        <profile>
+            <id>macosx-aarch64</id>
+            <properties>
+                <jextract.os>macosx</jextract.os>
+                <jextract.platform>aarch64</jextract.platform>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>download-jextract</id>
+                                <phase>validate</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/download-jextract.sh</executable>
+                                    <arguments>
+                                        <argument>-o</argument><argument>${jextract.os}</argument>
+                                        <argument>-p</argument><argument>${jextract.platform}</argument>
+                                        <argument>-d</argument><argument>${jextract.dir}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>generate-sources</id>
+                                <phase>generate-sources</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/generate-sources.sh</executable>
+                                    <arguments>
+                                        <argument>-d</argument><argument>${project.basedir}</argument>
+                                        <argument>-v</argument><argument>${python.version}</argument>
+                                        <argument>-j</argument><argument>${jextract.bin}</argument>
+                                        <argument>-o</argument><argument>${generated.sources.dir}</argument>
+                                        <argument>-p</argument><argument>${cpython.package}</argument>
+                                        <argument>-c</argument><argument>${cpython.class}</argument>
+                                        <argument>-l</argument><argument>${libpython.name}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- macOS Intel -->
+        <profile>
+            <id>macosx-x86_64</id>
+            <properties>
+                <jextract.os>macosx</jextract.os>
+                <jextract.platform>x86_64</jextract.platform>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>download-jextract</id>
+                                <phase>validate</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/download-jextract.sh</executable>
+                                    <arguments>
+                                        <argument>-o</argument><argument>${jextract.os}</argument>
+                                        <argument>-p</argument><argument>${jextract.platform}</argument>
+                                        <argument>-d</argument><argument>${jextract.dir}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>generate-sources</id>
+                                <phase>generate-sources</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/generate-sources.sh</executable>
+                                    <arguments>
+                                        <argument>-d</argument><argument>${project.basedir}</argument>
+                                        <argument>-v</argument><argument>${python.version}</argument>
+                                        <argument>-j</argument><argument>${jextract.bin}</argument>
+                                        <argument>-o</argument><argument>${generated.sources.dir}</argument>
+                                        <argument>-p</argument><argument>${cpython.package}</argument>
+                                        <argument>-c</argument><argument>${cpython.class}</argument>
+                                        <argument>-l</argument><argument>${libpython.name}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Linux x86_64 -->
+        <profile>
+            <id>linux-x86_64</id>
+            <properties>
+                <jextract.os>linux</jextract.os>
+                <jextract.platform>x86_64</jextract.platform>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <!-- vLLM 0.16.0 uses multiprocessing.Lock() which requires
+                                 POSIX named semaphores → writable /dev/shm.
+                                 Some Linux setups have mode 755; fix it to 1777. -->
+                            <execution>
+                                <id>fix-dev-shm-permissions</id>
+                                <phase>validate</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>bash</executable>
+                                    <arguments>
+                                        <argument>-c</argument>
+                                        <argument>[ "$(stat -c '%a' /dev/shm)" = "1777" ] || sudo chmod 1777 /dev/shm</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>download-jextract</id>
+                                <phase>validate</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/download-jextract.sh</executable>
+                                    <arguments>
+                                        <argument>-o</argument><argument>${jextract.os}</argument>
+                                        <argument>-p</argument><argument>${jextract.platform}</argument>
+                                        <argument>-d</argument><argument>${jextract.dir}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>generate-sources</id>
+                                <phase>generate-sources</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/generate-sources.sh</executable>
+                                    <arguments>
+                                        <argument>-d</argument><argument>${project.basedir}</argument>
+                                        <argument>-v</argument><argument>${python.version}</argument>
+                                        <argument>-j</argument><argument>${jextract.bin}</argument>
+                                        <argument>-o</argument><argument>${generated.sources.dir}</argument>
+                                        <argument>-p</argument><argument>${cpython.package}</argument>
+                                        <argument>-c</argument><argument>${cpython.class}</argument>
+                                        <argument>-l</argument><argument>${libpython.name}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <!-- Load python.properties (written by generate-sources.sh)
+                         so ${libpython.path} is available for Surefire's LD_PRELOAD. -->
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>properties-maven-plugin</artifactId>
+                        <version>1.3.0</version>
+                        <executions>
+                            <execution>
+                                <id>read-python-props</id>
+                                <phase>process-sources</phase>
+                                <goals>
+                                    <goal>read-project-properties</goal>
+                                </goals>
+                                <configuration>
+                                    <files>
+                                        <file>${project.basedir}/python.properties</file>
+                                    </files>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <!-- On Linux, System.load() opens libpython with RTLD_LOCAL —
+                         CPython symbols are hidden from extensions loaded later via
+                         dlopen (e.g. _ctypes.so needs PyTuple_Type).
+                         LD_PRELOAD forces RTLD_GLOBAL so all symbols are visible. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <argLine>
+                                --enable-native-access=ALL-UNNAMED
+                                --enable-preview
+                            </argLine>
+                            <environmentVariables>
+                                <LD_PRELOAD>${libpython.path}</LD_PRELOAD>
+                            </environmentVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             Backend profiles — vLLM Python package installation
+             ═══════════════════════════════════════════════════════════════════ -->
+
+        <!-- Apple Silicon Metal/MLX GPU -->
+        <profile>
+            <id>metal</id>
+            <properties>
+                <vllm.backend>metal</vllm.backend>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>setup-venv</id>
+                                <phase>initialize</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/setup-venv.sh</executable>
+                                    <arguments>
+                                        <argument>-d</argument><argument>${project.basedir}</argument>
+                                        <argument>-v</argument><argument>${python.version}</argument>
+                                        <argument>-b</argument><argument>${vllm.backend}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- NVIDIA CUDA GPU -->
+        <profile>
+            <id>cuda</id>
+            <properties>
+                <vllm.backend>cuda</vllm.backend>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>setup-venv</id>
+                                <phase>initialize</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/setup-venv.sh</executable>
+                                    <arguments>
+                                        <argument>-d</argument><argument>${project.basedir}</argument>
+                                        <argument>-v</argument><argument>${python.version}</argument>
+                                        <argument>-b</argument><argument>${vllm.backend}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- CPU-only -->
+        <profile>
+            <id>cpu</id>
+            <properties>
+                <vllm.backend>cpu</vllm.backend>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <version>3.6.3</version>
+                        <executions>
+                            <execution>
+                                <id>setup-venv</id>
+                                <phase>initialize</phase>
+                                <goals><goal>exec</goal></goals>
+                                <configuration>
+                                    <executable>${project.basedir}/scripts/setup-venv.sh</executable>
+                                    <arguments>
+                                        <argument>-d</argument><argument>${project.basedir}</argument>
+                                        <argument>-v</argument><argument>${python.version}</argument>
+                                        <argument>-b</argument><argument>${vllm.backend}</argument>
+                                    </arguments>
+                                    <environmentVariables>
+                                        <PROJECT_BASEDIR>${project.basedir}</PROJECT_BASEDIR>
+                                    </environmentVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Integration test profile — runs @Tag("integration") tests only.
+             Each test class runs in its own JVM fork (reuseForks=false) so
+             GPU memory is fully reclaimed between classes via _exit(0).
+             Usage: mvn test -P integration,macosx-aarch64,metal -->
+        <profile>
+            <id>integration</id>
+            <properties>
+                <surefire.excludedGroups/>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.5.4</version>
+                        <configuration>
+                            <groups>integration</groups>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- VLM integration test profile — runs @Tag("vlm-integration") tests only.
+             Requires CUDA (Linux). vllm-metal does not yet forward image data.
+             Each test class runs in its own JVM fork (reuseForks=false).
+             Usage: mvn test -P vlm-integration,linux-x86_64,cuda -->
+        <profile>
+            <id>vlm-integration</id>
+            <properties>
+                <surefire.excludedGroups/>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.5.4</version>
+                        <configuration>
+                            <groups>vlm-integration</groups>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+    </profiles>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-params</artifactId>
+            <version>5.11.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.27.3</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                    <compilerArgs>
+                        <arg>--enable-preview</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+
+            <!-- Register the jextract-generated sources directory as a compile root -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <executions>
+                    <execution>
+                        <id>add-generated-sources</id>
+                        <phase>generate-sources</phase>
+                        <goals><goal>add-source</goal></goals>
+                        <configuration>
+                            <sources>
+                                <source>${generated.sources.dir}</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.4</version>
+                <configuration>
+                    <argLine>--enable-native-access=ALL-UNNAMED --enable-preview</argLine>
+                    <!-- Exclude slow integration tests by default.
+                         Run them with: mvn test -P integration,macosx-aarch64,metal -->
+                    <excludedGroups>${surefire.excludedGroups}</excludedGroups>
+                </configuration>
+            </plugin>
+
+            <!--
+                mvn clean removes generated sources but NOT the venv.
+                The venv is expensive to recreate (~5 min from-source build of vLLM).
+                To force a fresh venv, delete .venv manually: rm -rf .venv
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-clean-plugin</artifactId>
+                <version>3.4.0</version>
+                <configuration>
+                    <filesets>
+                        <fileset>
+                            <directory>${generated.sources.dir}</directory>
+                            <followSymlinks>false</followSymlinks>
+                        </fileset>
+                    </filesets>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.2</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <addClasspath>true</addClasspath>
+                            <mainClass>io.gravitee.vllm.Main</mainClass>
+                        </manifest>
+                        <manifestEntries>
+                            <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
+                        </manifestEntries>
+                    </archive>
+                </configuration>
+            </plugin>
+
+        </plugins>
+    </build>
+
+</project>
