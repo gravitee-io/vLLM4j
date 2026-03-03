@@ -283,8 +283,11 @@ public final class PythonRuntime implements AutoCloseable {
      * Sets an environment variable in-process via {@code setenv(3)}.
      * Must be called before {@code Py_InitializeEx} for CPython to pick up
      * variables like {@code PYTHONHOME}.
+     *
+     * <p>Also useful to inject credentials such as {@code HF_TOKEN} before
+     * the vLLM Python engine initialises and downloads gated models.
      */
-    static void setEnv(String name, String value) {
+    public static void setEnv(String name, String value) {
         var lookup = Linker.nativeLinker().defaultLookup();
         var setenvAddr = lookup.find("setenv").orElseThrow(() ->
                 new VllmException("Cannot find setenv() in libc"));
