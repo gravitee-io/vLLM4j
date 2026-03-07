@@ -51,6 +51,9 @@ public final class VllmEngineBuilder {
     private Boolean enableChunkedPrefill;
     private String kvCacheDtype;
 
+    /** Runtime initialized by {@link #initRuntime()}, reused by {@link #build()}. */
+    private PythonRuntime runtime;
+
     /** Package-private: obtain via {@link VllmEngine#builder()}. */
     VllmEngineBuilder() {}
 
@@ -238,15 +241,38 @@ public final class VllmEngineBuilder {
     }
 
     /**
-     * Constructs a {@link VllmEngine}, initializing the CPython runtime and
-     * loading the model.
+     * Initializes the CPython runtime (and releases the GIL) without loading
+     * the model.
+     *
+     * <p>Call this before any code that needs CPython — for example, a pre-flight
+     * {@code CudaMemoryQuery} that calls {@code torch.cuda.mem_get_info()}.
+     * A subsequent call to {@link #build()} will reuse the already-initialized
+     * runtime instead of creating a new one.
+     *
+     * <p>Safe to call multiple times; the underlying {@code PythonRuntime} uses
+     * an {@link java.util.concurrent.atomic.AtomicBoolean} guard to ensure
+     * {@code Py_InitializeEx} is invoked at most once.
+     *
+     * @return this builder (for chaining)
+     * @throws VllmException if no suitable venv can be found or initialization fails
+     */
+    public VllmEngineBuilder initRuntime() {
+        if (runtime == null) {
+            Path resolvedVenv = (venvPath != null) ? venvPath : resolveVenv();
+            VllmBackend resolvedBackend = (backend != null) ? backend : PlatformResolver.backend();
+            runtime = new PythonRuntime(resolvedVenv, resolvedBackend);
+        }
+        return this;
+    }
+
+    /**
+     * Constructs a {@link VllmEngine}, initializing the CPython runtime (if not
+     * already done via {@link #initRuntime()}) and loading the model.
      *
      * @throws VllmException if no suitable venv can be found or initialization fails
      */
     public VllmEngine build() {
-        Path resolvedVenv = (venvPath != null) ? venvPath : resolveVenv();
-        VllmBackend resolvedBackend = (backend != null) ? backend : PlatformResolver.backend();
-        PythonRuntime runtime = new PythonRuntime(resolvedVenv, resolvedBackend);
+        initRuntime();
         return new VllmEngine(runtime, this);
     }
 

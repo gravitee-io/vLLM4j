@@ -44,6 +44,18 @@ public final class PythonRuntime implements AutoCloseable {
     /** Tracks whether CPython has been initialized (and GIL released). */
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
 
+    /**
+     * Returns {@code true} if CPython has been initialized via
+     * {@code Py_InitializeEx} and the GIL has been released.
+     *
+     * <p>Callers that need CPython but cannot guarantee initialization
+     * ordering (e.g. pre-flight memory checks) should test this before
+     * calling {@link GIL#acquire()}.
+     */
+    public static boolean isInitialized() {
+        return INITIALIZED.get();
+    }
+
     private volatile boolean closed = false;
 
     /**
