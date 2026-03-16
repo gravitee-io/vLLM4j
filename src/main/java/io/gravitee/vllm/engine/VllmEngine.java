@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Wraps vLLM's synchronous {@code LLMEngine}.
@@ -63,7 +64,7 @@ public final class VllmEngine implements AutoCloseable {
     /** Cached Python class: vllm.lora.request.LoRARequest. */
     private MemorySegment loraRequestClass;
 
-    private volatile boolean closed = false;
+    private final AtomicBoolean closed = new AtomicBoolean(false);
 
     /**
      * Creates an {@code LLMEngine} instance using the given runtime.
@@ -85,14 +86,24 @@ public final class VllmEngine implements AutoCloseable {
 
             MemorySegment llmEngineClass = PythonCall.importClass(arena, "vllm.engine.llm_engine", "LLMEngine");
             MemorySegment fromEngineArgs = PythonTypes.getAttr(arena, llmEngineClass, "from_engine_args");
-            engine = PythonCall.callOneArg(fromEngineArgs, engineArgsInst);
+            MemorySegment eng = PythonCall.callOneArg(fromEngineArgs, engineArgsInst);
             PythonErrors.checkPythonError("LLMEngine.from_engine_args()");
             PythonTypes.decref(fromEngineArgs);
             PythonTypes.decref(llmEngineClass);
             PythonTypes.decref(engineArgsInst);
 
-            jinja2Module = CPython.PyImport_ImportModule(arena.allocateFrom("jinja2"));
-            PythonErrors.checkPythonError("import jinja2");
+            MemorySegment jinja2;
+            try {
+                jinja2 = CPython.PyImport_ImportModule(arena.allocateFrom("jinja2"));
+                PythonErrors.checkPythonError("import jinja2");
+            } catch (Exception e) {
+                PythonTypes.decref(eng);
+                throw e;
+            }
+
+            // All Python objects created successfully — commit to fields
+            this.engine = eng;
+            this.jinja2Module = jinja2;
         }
     }
 
@@ -116,14 +127,24 @@ public final class VllmEngine implements AutoCloseable {
 
             MemorySegment llmEngineClass = PythonCall.importClass(arena, "vllm.engine.llm_engine", "LLMEngine");
             MemorySegment fromEngineArgs = PythonTypes.getAttr(arena, llmEngineClass, "from_engine_args");
-            engine = PythonCall.callOneArg(fromEngineArgs, engineArgsInst);
+            MemorySegment eng = PythonCall.callOneArg(fromEngineArgs, engineArgsInst);
             PythonErrors.checkPythonError("LLMEngine.from_engine_args()");
             PythonTypes.decref(fromEngineArgs);
             PythonTypes.decref(llmEngineClass);
             PythonTypes.decref(engineArgsInst);
 
-            jinja2Module = CPython.PyImport_ImportModule(arena.allocateFrom("jinja2"));
-            PythonErrors.checkPythonError("import jinja2");
+            MemorySegment jinja2;
+            try {
+                jinja2 = CPython.PyImport_ImportModule(arena.allocateFrom("jinja2"));
+                PythonErrors.checkPythonError("import jinja2");
+            } catch (Exception e) {
+                PythonTypes.decref(eng);
+                throw e;
+            }
+
+            // All Python objects created successfully — commit to fields
+            this.engine = eng;
+            this.jinja2Module = jinja2;
         }
     }
 
@@ -549,8 +570,7 @@ public final class VllmEngine implements AutoCloseable {
 
     @Override
     public void close() {
-        if (closed) return;
-        closed = true;
+        if (!closed.compareAndSet(false, true)) return;
 
         try (var gil = GIL.acquire()) {
             // Release the engine and jinja2 module references first.
@@ -864,6 +884,6 @@ public final class VllmEngine implements AutoCloseable {
     }
 
     private void checkNotClosed() {
-        if (closed) throw new IllegalStateException("VllmEngine has been closed");
+        if (closed.get()) throw new IllegalStateException("VllmEngine has been closed");
     }
 }
