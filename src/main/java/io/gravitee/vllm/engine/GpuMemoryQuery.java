@@ -50,6 +50,11 @@ public final class GpuMemoryQuery {
 
     private static volatile GpuBackend cachedBackend;
 
+    // Cached Python module references (borrowed from sys.modules after import)
+    private static volatile MemorySegment cachedTorchCuda;
+    private static volatile MemorySegment cachedTorchMps;
+    private static volatile MemorySegment cachedOsModule;
+
     private GpuMemoryQuery() {}
 
     /**
@@ -122,32 +127,32 @@ public final class GpuMemoryQuery {
 
     private static GpuMemoryInfo queryCuda() {
         try (var gil = GIL.acquire(); Arena arena = Arena.ofConfined()) {
-            MemorySegment torchCuda = CPython.PyImport_ImportModule(arena.allocateFrom("torch.cuda"));
-            if (PythonTypes.isNull(torchCuda)) { CPython.PyErr_Clear(); return null; }
+            MemorySegment torchCuda = cachedTorchCuda;
+            if (torchCuda == null) {
+                torchCuda = CPython.PyImport_ImportModule(arena.allocateFrom("torch.cuda"));
+                if (PythonTypes.isNull(torchCuda)) { CPython.PyErr_Clear(); return null; }
+                cachedTorchCuda = torchCuda;
+            }
+            MemorySegment memGetInfo = PythonTypes.getAttr(arena, torchCuda, "mem_get_info");
+            if (PythonTypes.isNull(memGetInfo)) { CPython.PyErr_Clear(); return null; }
             try {
-                MemorySegment memGetInfo = PythonTypes.getAttr(arena, torchCuda, "mem_get_info");
-                if (PythonTypes.isNull(memGetInfo)) { CPython.PyErr_Clear(); return null; }
+                MemorySegment deviceArg = CPython.PyLong_FromLong(0L);
+                MemorySegment result = PythonCall.callOneArg(memGetInfo, deviceArg);
+                PythonTypes.decref(deviceArg);
+                if (PythonTypes.isNull(result)) { CPython.PyErr_Clear(); return null; }
                 try {
-                    MemorySegment deviceArg = CPython.PyLong_FromLong(0L);
-                    MemorySegment result = PythonCall.callOneArg(memGetInfo, deviceArg);
-                    PythonTypes.decref(deviceArg);
-                    if (PythonTypes.isNull(result)) { CPython.PyErr_Clear(); return null; }
-                    try {
-                        MemorySegment pyFree = CPython.PySequence_GetItem(result, 0);
-                        MemorySegment pyTotal = CPython.PySequence_GetItem(result, 1);
-                        long free = CPython.PyLong_AsLong(pyFree);
-                        long total = CPython.PyLong_AsLong(pyTotal);
-                        PythonTypes.decref(pyFree);
-                        PythonTypes.decref(pyTotal);
-                        return new GpuMemoryInfo(free, total);
-                    } finally {
-                        PythonTypes.decref(result);
-                    }
+                    MemorySegment pyFree = CPython.PySequence_GetItem(result, 0);
+                    MemorySegment pyTotal = CPython.PySequence_GetItem(result, 1);
+                    long free = CPython.PyLong_AsLong(pyFree);
+                    long total = CPython.PyLong_AsLong(pyTotal);
+                    PythonTypes.decref(pyFree);
+                    PythonTypes.decref(pyTotal);
+                    return new GpuMemoryInfo(free, total);
                 } finally {
-                    PythonTypes.decref(memGetInfo);
+                    PythonTypes.decref(result);
                 }
             } finally {
-                PythonTypes.decref(torchCuda);
+                PythonTypes.decref(memGetInfo);
             }
         } catch (Exception e) {
             return null;
@@ -171,19 +176,19 @@ public final class GpuMemoryQuery {
             if (totalBytes <= 0) return null;
 
             // Current MPS allocation
-            MemorySegment torchMps = CPython.PyImport_ImportModule(arena.allocateFrom("torch.mps"));
-            if (PythonTypes.isNull(torchMps)) { CPython.PyErr_Clear(); return null; }
-            try {
-                MemorySegment fnName = PythonTypes.pyStr(arena, "current_allocated_memory");
-                MemorySegment pyAllocated = PythonCall.callMethodObjArgs(torchMps, fnName);
-                PythonTypes.decref(fnName);
-                if (PythonTypes.isNull(pyAllocated)) { CPython.PyErr_Clear(); return null; }
-                long allocated = CPython.PyLong_AsLong(pyAllocated);
-                PythonTypes.decref(pyAllocated);
-                return new GpuMemoryInfo(totalBytes - allocated, totalBytes);
-            } finally {
-                PythonTypes.decref(torchMps);
+            MemorySegment torchMps = cachedTorchMps;
+            if (torchMps == null) {
+                torchMps = CPython.PyImport_ImportModule(arena.allocateFrom("torch.mps"));
+                if (PythonTypes.isNull(torchMps)) { CPython.PyErr_Clear(); return null; }
+                cachedTorchMps = torchMps;
             }
+            MemorySegment fnName = PythonTypes.pyStr(arena, "current_allocated_memory");
+            MemorySegment pyAllocated = PythonCall.callMethodObjArgs(torchMps, fnName);
+            PythonTypes.decref(fnName);
+            if (PythonTypes.isNull(pyAllocated)) { CPython.PyErr_Clear(); return null; }
+            long allocated = CPython.PyLong_AsLong(pyAllocated);
+            PythonTypes.decref(pyAllocated);
+            return new GpuMemoryInfo(totalBytes - allocated, totalBytes);
         } catch (Exception e) {
             return null;
         }
@@ -193,30 +198,30 @@ public final class GpuMemoryQuery {
      * Reads total physical RAM via {@code os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')}.
      */
     private static long querySystemMemory(Arena arena) {
-        MemorySegment osModule = CPython.PyImport_ImportModule(arena.allocateFrom("os"));
-        if (PythonTypes.isNull(osModule)) { CPython.PyErr_Clear(); return -1; }
-        try {
-            MemorySegment sysconfName = PythonTypes.pyStr(arena, "sysconf");
-
-            MemorySegment pyPageSizeKey = PythonTypes.pyStr(arena, "SC_PAGE_SIZE");
-            MemorySegment pyPageSize = PythonCall.callMethodObjArgs(osModule, sysconfName, pyPageSizeKey);
-            PythonTypes.decref(pyPageSizeKey);
-            if (PythonTypes.isNull(pyPageSize)) { PythonTypes.decref(sysconfName); CPython.PyErr_Clear(); return -1; }
-            long pageSize = CPython.PyLong_AsLong(pyPageSize);
-            PythonTypes.decref(pyPageSize);
-
-            MemorySegment pyPhysPagesKey = PythonTypes.pyStr(arena, "SC_PHYS_PAGES");
-            MemorySegment pyPhysPages = PythonCall.callMethodObjArgs(osModule, sysconfName, pyPhysPagesKey);
-            PythonTypes.decref(pyPhysPagesKey);
-            PythonTypes.decref(sysconfName);
-            if (PythonTypes.isNull(pyPhysPages)) { CPython.PyErr_Clear(); return -1; }
-            long physPages = CPython.PyLong_AsLong(pyPhysPages);
-            PythonTypes.decref(pyPhysPages);
-
-            return pageSize * physPages;
-        } finally {
-            PythonTypes.decref(osModule);
+        MemorySegment osModule = cachedOsModule;
+        if (osModule == null) {
+            osModule = CPython.PyImport_ImportModule(arena.allocateFrom("os"));
+            if (PythonTypes.isNull(osModule)) { CPython.PyErr_Clear(); return -1; }
+            cachedOsModule = osModule;
         }
+        MemorySegment sysconfName = PythonTypes.pyStr(arena, "sysconf");
+
+        MemorySegment pyPageSizeKey = PythonTypes.pyStr(arena, "SC_PAGE_SIZE");
+        MemorySegment pyPageSize = PythonCall.callMethodObjArgs(osModule, sysconfName, pyPageSizeKey);
+        PythonTypes.decref(pyPageSizeKey);
+        if (PythonTypes.isNull(pyPageSize)) { PythonTypes.decref(sysconfName); CPython.PyErr_Clear(); return -1; }
+        long pageSize = CPython.PyLong_AsLong(pyPageSize);
+        PythonTypes.decref(pyPageSize);
+
+        MemorySegment pyPhysPagesKey = PythonTypes.pyStr(arena, "SC_PHYS_PAGES");
+        MemorySegment pyPhysPages = PythonCall.callMethodObjArgs(osModule, sysconfName, pyPhysPagesKey);
+        PythonTypes.decref(pyPhysPagesKey);
+        PythonTypes.decref(sysconfName);
+        if (PythonTypes.isNull(pyPhysPages)) { CPython.PyErr_Clear(); return -1; }
+        long physPages = CPython.PyLong_AsLong(pyPhysPages);
+        PythonTypes.decref(pyPhysPages);
+
+        return pageSize * physPages;
     }
 
     // ── Shared helpers ──────────────────────────────────────────────────────
@@ -247,13 +252,26 @@ public final class GpuMemoryQuery {
      */
     private static void callEmptyCache(String moduleName) {
         try (var gil = GIL.acquire(); Arena tmp = Arena.ofConfined()) {
-            MemorySegment module = CPython.PyImport_ImportModule(tmp.allocateFrom(moduleName));
-            if (PythonTypes.isNull(module)) { CPython.PyErr_Clear(); return; }
+            MemorySegment module;
+            if ("torch.cuda".equals(moduleName)) {
+                module = cachedTorchCuda;
+                if (module == null) {
+                    module = CPython.PyImport_ImportModule(tmp.allocateFrom(moduleName));
+                    if (PythonTypes.isNull(module)) { CPython.PyErr_Clear(); return; }
+                    cachedTorchCuda = module;
+                }
+            } else {
+                module = cachedTorchMps;
+                if (module == null) {
+                    module = CPython.PyImport_ImportModule(tmp.allocateFrom(moduleName));
+                    if (PythonTypes.isNull(module)) { CPython.PyErr_Clear(); return; }
+                    cachedTorchMps = module;
+                }
+            }
             MemorySegment fnName = PythonTypes.pyStr(tmp, "empty_cache");
             MemorySegment result = PythonCall.callMethodObjArgs(module, fnName);
             PythonTypes.decref(result);
             PythonTypes.decref(fnName);
-            PythonTypes.decref(module);
         } catch (Exception e) {
             CPython.PyErr_Clear();
         }
