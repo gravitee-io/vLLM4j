@@ -245,7 +245,7 @@ public final class VllmEngineBuilder {
      * the model.
      *
      * <p>Call this before any code that needs CPython — for example, a pre-flight
-     * {@code CudaMemoryQuery} that calls {@code torch.cuda.mem_get_info()}.
+      * {@code GpuMemoryQuery} that calls {@code torch.cuda.mem_get_info()}.
      * A subsequent call to {@link #build()} will reuse the already-initialized
      * runtime instead of creating a new one.
      *

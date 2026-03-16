@@ -17,26 +17,26 @@ package io.gravitee.vllm.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.gravitee.vllm.engine.CudaMemoryQuery.CudaMemoryInfo;
+import io.gravitee.vllm.engine.GpuMemoryQuery.GpuMemoryInfo;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-class CudaMemoryQueryTest {
+class GpuMemoryQueryTest {
 
     @Test
-    @DisplayName("CudaMemoryInfo record: accessors return correct values")
-    void cudaMemoryInfo_accessors() {
-        CudaMemoryInfo info = new CudaMemoryInfo(8_000_000_000L, 24_000_000_000L);
+    @DisplayName("GpuMemoryInfo record: accessors return correct values")
+    void gpuMemoryInfo_accessors() {
+        GpuMemoryInfo info = new GpuMemoryInfo(8_000_000_000L, 24_000_000_000L);
         assertThat(info.freeBytes()).isEqualTo(8_000_000_000L);
         assertThat(info.totalBytes()).isEqualTo(24_000_000_000L);
     }
 
     @Test
-    @DisplayName("CudaMemoryInfo record: equality and hashCode")
-    void cudaMemoryInfo_equality() {
-        CudaMemoryInfo a = new CudaMemoryInfo(1024, 4096);
-        CudaMemoryInfo b = new CudaMemoryInfo(1024, 4096);
-        CudaMemoryInfo c = new CudaMemoryInfo(2048, 4096);
+    @DisplayName("GpuMemoryInfo record: equality and hashCode")
+    void gpuMemoryInfo_equality() {
+        GpuMemoryInfo a = new GpuMemoryInfo(1024, 4096);
+        GpuMemoryInfo b = new GpuMemoryInfo(1024, 4096);
+        GpuMemoryInfo c = new GpuMemoryInfo(2048, 4096);
 
         assertThat(a).isEqualTo(b);
         assertThat(a).hasSameHashCodeAs(b);
@@ -44,27 +44,27 @@ class CudaMemoryQueryTest {
     }
 
     @Test
-    @DisplayName("CudaMemoryInfo record: toString includes field values")
-    void cudaMemoryInfo_toString() {
-        CudaMemoryInfo info = new CudaMemoryInfo(100, 200);
+    @DisplayName("GpuMemoryInfo record: toString includes field values")
+    void gpuMemoryInfo_toString() {
+        GpuMemoryInfo info = new GpuMemoryInfo(100, 200);
         assertThat(info.toString()).contains("100");
         assertThat(info.toString()).contains("200");
     }
 
     @Test
-    @DisplayName("CudaMemoryInfo record: zero values are valid")
-    void cudaMemoryInfo_zero_values() {
-        CudaMemoryInfo info = new CudaMemoryInfo(0, 0);
+    @DisplayName("GpuMemoryInfo record: zero values are valid")
+    void gpuMemoryInfo_zero_values() {
+        GpuMemoryInfo info = new GpuMemoryInfo(0, 0);
         assertThat(info.freeBytes()).isEqualTo(0);
         assertThat(info.totalBytes()).isEqualTo(0);
     }
 
     @Test
-    @DisplayName("CudaMemoryInfo record: large values (>32-bit) work correctly")
-    void cudaMemoryInfo_large_values() {
+    @DisplayName("GpuMemoryInfo record: large values (>32-bit) work correctly")
+    void gpuMemoryInfo_large_values() {
         long free = 81_604_378_624L;  // ~76 GiB (A100 80GB typical free)
         long total = 85_899_345_920L; // ~80 GiB
-        CudaMemoryInfo info = new CudaMemoryInfo(free, total);
+        GpuMemoryInfo info = new GpuMemoryInfo(free, total);
         assertThat(info.freeBytes()).isEqualTo(free);
         assertThat(info.totalBytes()).isEqualTo(total);
     }

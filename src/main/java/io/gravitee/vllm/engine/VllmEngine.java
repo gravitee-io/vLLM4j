@@ -553,11 +553,48 @@ public final class VllmEngine implements AutoCloseable {
         closed = true;
 
         try (var gil = GIL.acquire()) {
+            // Release the engine and jinja2 module references first.
+            // When the engine's refcount drops to zero, CPython may trigger
+            // LLMEngine.__del__() and free internal Python objects. However,
+            // PyTorch's CUDA caching allocator retains GPU memory blocks even
+            // after tensors are freed.
             PythonTypes.decref(engine);
             PythonTypes.decref(jinja2Module);
+
+            // Force a Python garbage collection to break any circular references
+            // that may be preventing the engine's internal objects from being freed.
+            collectGarbage();
         }
 
+        // Flush the GPU memory cache (CUDA or MPS) so VRAM is actually
+        // returned to the driver. Without this, freed tensors remain in
+        // PyTorch's block pool and the memory stays allocated to the process.
+        GpuMemoryQuery.emptyCache();
+
         runtime.close();
+    }
+
+    /**
+     * Calls {@code gc.collect()} to force Python garbage collection.
+     *
+     * <p>This breaks circular references in the engine's internal state
+     * (e.g. scheduler ↔ model runner ↔ cache engine cycles) that prevent
+     * automatic deallocation via reference counting alone.
+     *
+     * <p>Best-effort — silently ignores any errors.
+     */
+    private void collectGarbage() {
+        try (Arena tmp = Arena.ofConfined()) {
+            MemorySegment gcModule = CPython.PyImport_ImportModule(tmp.allocateFrom("gc"));
+            if (PythonTypes.isNull(gcModule)) { CPython.PyErr_Clear(); return; }
+            MemorySegment collectName = PythonTypes.pyStr(tmp, "collect");
+            MemorySegment result = PythonCall.callMethodObjArgs(gcModule, collectName);
+            PythonTypes.decref(result);
+            PythonTypes.decref(collectName);
+            PythonTypes.decref(gcModule);
+        } catch (Exception e) {
+            CPython.PyErr_Clear();
+        }
     }
 
     // ── Private helpers ────────────────────────────────────────────────────
