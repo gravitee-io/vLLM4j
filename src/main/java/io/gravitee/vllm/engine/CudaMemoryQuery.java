@@ -18,6 +18,7 @@ package io.gravitee.vllm.engine;
 import io.gravitee.vllm.binding.PythonCall;
 import io.gravitee.vllm.binding.PythonTypes;
 import io.gravitee.vllm.runtime.GIL;
+import io.gravitee.vllm.runtime.PythonRuntime;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import org.vllm.python.CPython;
@@ -47,6 +48,9 @@ public final class CudaMemoryQuery {
      *         or any error occurs. Never throws.
      */
     public static CudaMemoryInfo query() {
+        if (!PythonRuntime.isInitialized()) {
+            return null;
+        }
         try (var gil = GIL.acquire(); Arena arena = Arena.ofConfined()) {
             MemorySegment torchCuda = CPython.PyImport_ImportModule(arena.allocateFrom("torch.cuda"));
             if (PythonTypes.isNull(torchCuda)) {
