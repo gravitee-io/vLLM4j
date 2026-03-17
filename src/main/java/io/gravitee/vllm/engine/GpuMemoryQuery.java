@@ -123,6 +123,35 @@ public final class GpuMemoryQuery {
         }
     }
 
+    /**
+     * Waits for all in-flight GPU operations to complete, then flushes
+     * the caching allocator.
+     *
+     * <p>On CUDA: calls {@code torch.cuda.synchronize()} followed by
+     * {@code torch.cuda.empty_cache()}. The synchronize ensures all
+     * asynchronous kernels and memcpys finish before we release memory
+     * blocks — without it, {@code empty_cache()} may skip blocks still
+     * referenced by pending operations.
+     * <p>On MPS: calls {@code torch.mps.synchronize()} followed by
+     * {@code torch.mps.empty_cache()}.
+     * <p>On CPU/NONE: no-op.
+     *
+     * <p>Best-effort — silently ignores any errors.
+     */
+    public static void synchronizeAndEmptyCache() {
+        switch (detectBackend()) {
+            case CUDA -> {
+                callSynchronize("torch.cuda");
+                callEmptyCache("torch.cuda");
+            }
+            case MPS -> {
+                callSynchronize("torch.mps");
+                callEmptyCache("torch.mps");
+            }
+            case NONE -> {}
+        }
+    }
+
     // ── CUDA backend ────────────────────────────────────────────────────────
 
     private static GpuMemoryInfo queryCuda() {
@@ -251,6 +280,23 @@ public final class GpuMemoryQuery {
      * Best-effort — silently ignores errors.
      */
     private static void callEmptyCache(String moduleName) {
+        callNoArgMethod(moduleName, "empty_cache");
+    }
+
+    /**
+     * Calls {@code <module>.synchronize()} on the given torch backend module.
+     * Waits for all GPU operations to complete before returning.
+     * Best-effort — silently ignores errors.
+     */
+    private static void callSynchronize(String moduleName) {
+        callNoArgMethod(moduleName, "synchronize");
+    }
+
+    /**
+     * Calls a zero-argument method on a cached torch backend module.
+     * Best-effort — silently ignores errors.
+     */
+    private static void callNoArgMethod(String moduleName, String methodName) {
         try (var gil = GIL.acquire(); Arena tmp = Arena.ofConfined()) {
             MemorySegment module;
             if ("torch.cuda".equals(moduleName)) {
@@ -268,7 +314,7 @@ public final class GpuMemoryQuery {
                     cachedTorchMps = module;
                 }
             }
-            MemorySegment fnName = PythonTypes.pyStr(tmp, "empty_cache");
+            MemorySegment fnName = PythonTypes.pyStr(tmp, methodName);
             MemorySegment result = PythonCall.callMethodObjArgs(module, fnName);
             PythonTypes.decref(result);
             PythonTypes.decref(fnName);

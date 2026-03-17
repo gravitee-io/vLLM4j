@@ -26,9 +26,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>Calling {@code Py_InitializeEx(0)}</li>
  *   <li>Fixing {@code sys.path} to include the venv's site-packages</li>
  *   <li>Fixing {@code sys.executable} to the venv's Python binary</li>
- *   <li>Registering a shutdown hook to hard-exit the process on close,
- *       bypassing native atexit handlers that would otherwise SIGABRT</li>
  * </ul>
+ *
+ * <h2>Interpreter lifecycle</h2>
+ * <p>The CPython interpreter is a <em>process-wide singleton</em>. Once
+ * initialized via {@code Py_InitializeEx}, it remains alive for the lifetime
+ * of the JVM. {@link #close()} is intentionally a no-op — calling
+ * {@code Py_FinalizeEx} would trigger SIGABRT from PyTorch/vLLM atexit
+ * handlers, and the interpreter cannot be safely re-initialized afterward.
+ *
+ * <p>GPU memory is released by {@code VllmEngine.close()}, which decrefs all
+ * Python objects, runs {@code gc.collect()}, and flushes the CUDA/MPS caching
+ * allocator. The ~100-300 MB CUDA context overhead persists but is reused by
+ * subsequent model loads.
  *
  * <h2>GIL contract</h2>
  * <p>The GIL is acquired during {@code Py_InitializeEx}. After initialization
@@ -131,45 +141,19 @@ public final class PythonRuntime implements AutoCloseable {
         if (closed) return;
         closed = true;
 
-        // We deliberately skip Py_FinalizeEx() here.
+        // The CPython interpreter is a process-wide singleton — it stays alive
+        // for the lifetime of the JVM.  Individual VllmEngine instances release
+        // their Python objects and GPU memory in VllmEngine.close(); the
+        // interpreter itself is never finalized because:
         //
-        // vLLM / PyTorch / MLX native extensions call abort() inside their
-        // atexit handlers or background-thread teardown, which sends SIGABRT
-        // to the process (exit code 134).  macOS abort() resets the SIGABRT
-        // disposition to SIG_DFL before raising it, so signal(SIGABRT, SIG_IGN)
-        // cannot prevent it.
-        //
-        // Instead we register a JVM shutdown hook that calls _exit(0) to
-        // hard-terminate the process before Python's daemon threads or atexit
-        // handlers get a chance to abort().  This is safe because:
-        //   - All test results have already been reported to Surefire
-        //   - The OS reclaims all process resources on _exit
-        //   - _exit skips C atexit handlers entirely (including the problematic ones)
+        //   1. Py_FinalizeEx() triggers SIGABRT from PyTorch/vLLM atexit
+        //      handlers and native thread teardown.
+        //   2. Py_InitializeEx() cannot be safely called again after finalize.
+        //   3. The CUDA context (~100-300 MB) persists anyway and is reused
+        //      by the next model load, so keeping the interpreter alive is
+        //      effectively free.
         //
         // See: https://docs.python.org/3/c-api/init.html#c.Py_FinalizeEx
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> hardExit(0),
-                "vllm4j-hard-exit"));
-    }
-
-    // ── Hard exit helper ────────────────────────────────────────────────────
-
-    /**
-     * Calls POSIX {@code _exit(status)} to terminate the process immediately,
-     * bypassing C atexit handlers and Python finalizers.
-     */
-    private static void hardExit(int status) {
-        try {
-            var linker  = Linker.nativeLinker();
-            var lookup  = linker.defaultLookup();
-            var exitAddr = lookup.find("_exit").orElseThrow();
-            var desc = FunctionDescriptor.ofVoid(ValueLayout.JAVA_INT);
-            var exitHandle = linker.downcallHandle(exitAddr, desc);
-            exitHandle.invokeExact(status);
-        } catch (Throwable t) {
-            // Last resort — Runtime.halt also skips shutdown hooks (we're
-            // already inside one) and C atexit handlers on most JVMs.
-            Runtime.getRuntime().halt(0);
-        }
     }
 
     // ── sys.path / sys.executable fixes ────────────────────────────────────

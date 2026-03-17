@@ -5,7 +5,6 @@ import io.gravitee.vllm.binding.PythonErrors;
 import io.gravitee.vllm.binding.PythonTypes;
 import io.gravitee.vllm.binding.VllmException;
 import io.gravitee.vllm.runtime.GIL;
-import io.gravitee.vllm.runtime.PythonRuntime;
 
 import org.vllm.python.CPython;
 
@@ -50,7 +49,6 @@ public final class VllmEngine implements AutoCloseable {
         return new VllmEngineBuilder();
     }
 
-    private final PythonRuntime runtime;
     private final MemorySegment engine;
     private final MemorySegment jinja2Module;
     private final Arena arena = Arena.ofAuto();
@@ -69,13 +67,10 @@ public final class VllmEngine implements AutoCloseable {
     /**
      * Creates an {@code LLMEngine} instance using the given runtime.
      *
-     * @param runtime an initialized {@link PythonRuntime}
      * @param model   HuggingFace model id, e.g. {@code "Qwen/Qwen3-0.6B"}
      * @param dtype   torch dtype string, e.g. {@code "auto"} or {@code "float32"}
      */
-    public VllmEngine(PythonRuntime runtime, String model, String dtype) {
-        this.runtime = runtime;
-
+    public VllmEngine(String model, String dtype) {
         try (var gil = GIL.acquire()) {
             MemorySegment engineArgsClass  = PythonCall.importClass(arena, "vllm.engine.arg_utils", "EngineArgs");
             MemorySegment engineArgsKwargs = buildEngineArgsKwargs(model, dtype);
@@ -111,12 +106,9 @@ public final class VllmEngine implements AutoCloseable {
      * Creates an {@code LLMEngine} from a builder, applying all configured
      * engine parameters.
      *
-     * @param runtime an initialized {@link PythonRuntime}
      * @param builder the builder containing engine configuration
      */
-    VllmEngine(PythonRuntime runtime, VllmEngineBuilder builder) {
-        this.runtime = runtime;
-
+    VllmEngine(VllmEngineBuilder builder) {
         try (var gil = GIL.acquire()) {
             MemorySegment engineArgsClass  = PythonCall.importClass(arena, "vllm.engine.arg_utils", "EngineArgs");
             MemorySegment engineArgsKwargs = buildEngineArgsKwargs(builder);
@@ -573,25 +565,101 @@ public final class VllmEngine implements AutoCloseable {
         if (!closed.compareAndSet(false, true)) return;
 
         try (var gil = GIL.acquire()) {
-            // Release the engine and jinja2 module references first.
-            // When the engine's refcount drops to zero, CPython may trigger
-            // LLMEngine.__del__() and free internal Python objects. However,
-            // PyTorch's CUDA caching allocator retains GPU memory blocks even
-            // after tensors are freed.
-            PythonTypes.decref(engine);
+            // Release cached LoRA helpers (if they were lazily initialized).
+            if (loraPathResolver != null) {
+                PythonTypes.decref(loraPathResolver);
+                loraPathResolver = null;
+            }
+            if (loraRequestClass != null) {
+                PythonTypes.decref(loraRequestClass);
+                loraRequestClass = null;
+            }
+
+            // Explicitly shut down the engine's internals via the Python API.
+            // engine_core.shutdown() tears down the model executor, scheduler,
+            // and worker — releasing GPU tensors. This mirrors what vLLM's own
+            // LLMEngine.__del__() does.
+            shutdownEngineCore();
+
+            // Use Python's 'del engine' equivalent: run exec("del engine")
+            // with the engine in a temporary namespace. This triggers
+            // LLMEngine.__del__() immediately (if refcount drops to zero)
+            // rather than deferring to garbage collection.
+            deleteViaPython(engine);
+
+            // Release the jinja2 module reference.
             PythonTypes.decref(jinja2Module);
 
-            // Force a Python garbage collection to break any circular references
-            // that may be preventing the engine's internal objects from being freed.
+            // Force multiple Python garbage collection passes to break circular
+            // references (scheduler ↔ model_runner ↔ cache_engine cycles) that
+            // prevent automatic deallocation via reference counting alone.
+            // A single gc.collect() may not resolve multi-level cycles.
+            collectGarbage();
+            collectGarbage();
             collectGarbage();
         }
 
-        // Flush the GPU memory cache (CUDA or MPS) so VRAM is actually
-        // returned to the driver. Without this, freed tensors remain in
-        // PyTorch's block pool and the memory stays allocated to the process.
-        GpuMemoryQuery.emptyCache();
+        // Wait for any in-flight GPU operations, then flush PyTorch's caching
+        // allocator so VRAM is actually returned to the driver.
+        // On MPS/CPU the synchronize is a no-op; on CUDA it ensures all
+        // kernels and memcpys complete before we release the memory blocks.
+        GpuMemoryQuery.synchronizeAndEmptyCache();
+    }
 
-        runtime.close();
+    /**
+     * Calls {@code engine.engine_core.shutdown()} to tear down the model
+     * executor and release GPU resources from the Python side.
+     *
+     * <p>Best-effort — silently ignores errors (e.g. if the engine has no
+     * {@code engine_core} attribute, or if {@code shutdown()} is not available).
+     */
+    private void shutdownEngineCore() {
+        try {
+            MemorySegment engineCore = PythonTypes.getAttr(arena, engine, "engine_core");
+            if (!PythonTypes.isNull(engineCore) && !PythonTypes.isNone(engineCore)) {
+                // engine_core may be an InprocClient wrapping the real EngineCore
+                MemorySegment innerCore = PythonTypes.getAttr(arena, engineCore, "engine_core");
+                MemorySegment target = (!PythonTypes.isNull(innerCore) && !PythonTypes.isNone(innerCore))
+                        ? innerCore : engineCore;
+                MemorySegment shutdownName = PythonTypes.pyStr(arena, "shutdown");
+                MemorySegment result = PythonCall.callMethodObjArgs(target, shutdownName);
+                PythonTypes.decref(result);
+                PythonTypes.decref(shutdownName);
+                if (target != engineCore) PythonTypes.decref(innerCore);
+            }
+            PythonTypes.decref(engineCore);
+        } catch (Exception e) {
+            CPython.PyErr_Clear();
+        }
+    }
+
+    /**
+     * Performs the equivalent of Python's {@code del obj} by placing the object
+     * in a temporary namespace dict and executing {@code exec("del __o", ns)}.
+     *
+     * <p>This triggers the object's {@code __del__} immediately if our reference
+     * was the last one. Also decrefs our own Java-side reference.
+     *
+     * <p>Best-effort — falls back to a plain {@code decref} on any error.
+     */
+    private void deleteViaPython(MemorySegment pyObject) {
+        try (Arena tmp = Arena.ofConfined()) {
+            MemorySegment ns = CPython.PyDict_New();
+            PythonTypes.putDictObj(tmp, ns, "__o", pyObject);
+            MemorySegment code = PythonTypes.pyStr(tmp, "del __o");
+            MemorySegment builtins = CPython.PyImport_ImportModule(tmp.allocateFrom("builtins"));
+            MemorySegment execFn = PythonTypes.getAttr(tmp, builtins, "exec");
+            MemorySegment result = PythonCall.callMethodObjArgs(execFn, code, ns);
+            PythonTypes.decref(result);
+            PythonTypes.decref(execFn);
+            PythonTypes.decref(builtins);
+            PythonTypes.decref(ns);
+            PythonTypes.decref(code);
+        } catch (Exception e) {
+            // Fallback: just decref directly
+            PythonTypes.decref(pyObject);
+            CPython.PyErr_Clear();
+        }
     }
 
     /**

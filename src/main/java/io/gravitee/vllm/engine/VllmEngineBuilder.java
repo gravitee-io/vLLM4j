@@ -273,7 +273,7 @@ public final class VllmEngineBuilder {
      */
     public VllmEngine build() {
         initRuntime();
-        return new VllmEngine(runtime, this);
+        return new VllmEngine(this);
     }
 
     // ── Venv auto-detection ────────────────────────────────────────────────
