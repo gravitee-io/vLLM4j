@@ -659,60 +659,77 @@ public final class VllmEngine implements AutoCloseable {
             System.out.println("[vLLM4j] close: sleep done");
             System.out.flush();
 
+            // Clear CuMemAllocator.pointer_to_data so the next engine can
+            // pass the get_current_usage() == 0 assertion. Then set
+            // CuMemAllocator.instance = None so a fresh allocator is created.
+            System.out.println("[vLLM4j] close: resetting CuMemAllocator");
+            System.out.flush();
+            resetCuMemAllocator();
+
             System.out.println("[vLLM4j] close: calling shutdownEngineCore()");
             System.out.flush();
             shutdownEngineCore();
             System.out.println("[vLLM4j] close: shutdownEngineCore() done");
             System.out.flush();
 
-            System.out.println("[vLLM4j] close: decref(engine)");
-            System.out.flush();
-            PythonTypes.decref(engine);
-            System.out.println("[vLLM4j] close: decref(engine) done");
-            System.out.flush();
-
+            // After sleep(), GPU memory is released. We intentionally DO NOT
+            // call decref(engine) or gc.collect() because destroying the Python
+            // objects triggers MemPool::~MemPool() which crashes with
+            // "captures_underway.empty() INTERNAL ASSERT FAILED" — a known
+            // PyTorch bug when pluggable allocator pools are destroyed after
+            // sleep() has unmapped the underlying GPU memory.
+            //
+            // The engine's Python objects will leak in the CPython heap (they
+            // hold no GPU memory after sleep). This is a deliberate tradeoff:
+            // ~10-20 MB of CPU-side Python objects vs a guaranteed crash.
             System.out.println("[vLLM4j] close: decref(jinja2Module)");
             System.out.flush();
             PythonTypes.decref(jinja2Module);
 
-            System.out.println("[vLLM4j] close: gc.collect() pass 1");
-            System.out.flush();
-            collectGarbage();
-            System.out.println("[vLLM4j] close: gc.collect() pass 2");
-            System.out.flush();
-            collectGarbage();
-            System.out.println("[vLLM4j] close: gc.collect() pass 3");
-            System.out.flush();
-            collectGarbage();
-            System.out.println("[vLLM4j] close: gc.collect() done, releasing GIL");
+            System.out.println("[vLLM4j] close: releasing GIL");
             System.out.flush();
         }
 
-        System.out.println("[vLLM4j] close: calling synchronizeAndEmptyCache()");
-        System.out.flush();
-        GpuMemoryQuery.synchronizeAndEmptyCache();
-        System.out.println("[vLLM4j] close: synchronizeAndEmptyCache() done — teardown complete");
+        System.out.println("[vLLM4j] close: teardown complete");
         System.out.flush();
     }
 
     /**
-     * Clears the {@code CuMemAllocator}'s stale state so a new engine can
-     * be created in the same process.
+     * Resets the {@code CuMemAllocator} singleton so a new engine can be
+     * created in the same process without hitting stale state.
      *
-     * <p>After {@code sleep()}, the allocator's {@code pointer_to_data} dict
+     * <h3>Problem</h3>
+     * After {@code sleep()}, the allocator's {@code pointer_to_data} dict
      * still has entries (handles that were unmapped but not removed from the
      * dict). The next engine's {@code load_model()} asserts
      * {@code get_current_usage() == 0} and fails with "Sleep mode can only
      * be used for one instance per process."
      *
-     * <p>We clear only {@code pointer_to_data} — the entries are stale
-     * (GPU memory was already unmapped by {@code sleep()}), and their CPU
-     * backup tensors are freed when the dict is cleared.
+     * <h3>Strategy</h3>
+     * <ol>
+     *   <li>Clear {@code pointer_to_data} on the current instance — the
+     *       entries are stale (GPU memory was already unmapped by
+     *       {@code sleep()}). This makes {@code get_current_usage() == 0}.</li>
+     *   <li>Set {@code CuMemAllocator.instance = None} — forces the next
+     *       engine to create a fresh singleton with new
+     *       {@code allocator_and_pools}.</li>
+     * </ol>
      *
-     * <p>We do <em>not</em> clear {@code allocator_and_pools} or reset the
-     * singleton. The PyTorch pluggable allocator pools are C-level objects
-     * that must persist — creating new ones would allocate additional GPU
-     * memory instead of reusing the existing pools.
+     * <h3>Why this is safe</h3>
+     * <p>The old allocator instance (and its {@code allocator_and_pools}
+     * containing the PyTorch {@code MemPool} objects) is <em>not</em>
+     * destroyed. It stays alive because the old engine's Python objects
+     * are intentionally leaked (we skip {@code decref(engine)} and
+     * {@code gc.collect()} in {@link #close()}) and they hold a reference
+     * chain back to the allocator via the model executor → workers →
+     * memory pool context.
+     *
+     * <p>This avoids the {@code MemPool::~MemPool()} crash
+     * ({@code captures_underway.empty() INTERNAL ASSERT FAILED}) that
+     * happens whenever PyTorch pool objects are garbage-collected after
+     * {@code sleep()} has unmapped the underlying GPU memory.
+     *
+     * <p>The CPU-side cost of the leaked objects is small (~10-20 MB).
      *
      * <p>Best-effort — silently ignores errors.
      */
@@ -740,9 +757,26 @@ public final class VllmEngine implements AutoCloseable {
                     PythonTypes.decref(clearResult);
                     PythonTypes.decref(clearName);
                     PythonTypes.decref(pointerToData);
+                    System.out.println("[vLLM4j] resetCuMemAllocator: cleared pointer_to_data");
+                    System.out.flush();
                 }
                 PythonTypes.decref(instance);
             }
+
+            // Set CuMemAllocator.instance = None so the next engine creates
+            // a completely fresh allocator. The old instance stays alive
+            // (prevented from GC by the leaked engine's reference chain).
+            int rc = CPython.PyObject_SetAttrString(cls,
+                    tmp.allocateFrom("instance"), PythonTypes.pyNone());
+            if (rc != 0) {
+                System.out.println("[vLLM4j] resetCuMemAllocator: failed to set instance = None");
+                System.out.flush();
+                CPython.PyErr_Clear();
+            } else {
+                System.out.println("[vLLM4j] resetCuMemAllocator: set CuMemAllocator.instance = None");
+                System.out.flush();
+            }
+
             PythonTypes.decref(cls);
             PythonTypes.decref(cumemModule);
         } catch (Exception e) {
