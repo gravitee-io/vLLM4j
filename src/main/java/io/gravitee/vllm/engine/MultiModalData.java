@@ -40,10 +40,6 @@ public final class MultiModalData {
     private final List<byte[]> images = new ArrayList<>();
     private final List<byte[]> audios = new ArrayList<>();
 
-    // Cached Python module references
-    private static volatile MemorySegment cachedIoModule;
-    private static volatile MemorySegment cachedPilImageModule;
-
     /**
      * Adds an image from raw bytes (JPEG, PNG, etc.).
      *
@@ -165,19 +161,12 @@ public final class MultiModalData {
      * {@code PIL.Image.open(io.BytesIO(data))}.
      */
     private MemorySegment buildImageList(Arena arena) {
-        // import io, PIL.Image (cached)
-        MemorySegment ioModule = cachedIoModule;
-        if (ioModule == null) {
-            ioModule = CPython.PyImport_ImportModule(arena.allocateFrom("io"));
-            PythonErrors.checkPythonError("import io");
-            cachedIoModule = ioModule;
-        }
-        MemorySegment pilImageModule = cachedPilImageModule;
-        if (pilImageModule == null) {
-            pilImageModule = CPython.PyImport_ImportModule(arena.allocateFrom("PIL.Image"));
-            PythonErrors.checkPythonError("import PIL.Image");
-            cachedPilImageModule = pilImageModule;
-        }
+        // import io, PIL.Image (fresh each time — PyImport_ImportModule is
+        // backed by sys.modules so repeated imports are just a dict lookup)
+        MemorySegment ioModule = CPython.PyImport_ImportModule(arena.allocateFrom("io"));
+        PythonErrors.checkPythonError("import io");
+        MemorySegment pilImageModule = CPython.PyImport_ImportModule(arena.allocateFrom("PIL.Image"));
+        PythonErrors.checkPythonError("import PIL.Image");
 
         MemorySegment bytesIOClass = PythonTypes.getAttr(arena, ioModule, "BytesIO");
         MemorySegment imageOpen = PythonTypes.getAttr(arena, pilImageModule, "open");
@@ -201,6 +190,8 @@ public final class MultiModalData {
 
         PythonTypes.decref(imageOpen);
         PythonTypes.decref(bytesIOClass);
+        PythonTypes.decref(pilImageModule);
+        PythonTypes.decref(ioModule);
 
         return pyList;
     }

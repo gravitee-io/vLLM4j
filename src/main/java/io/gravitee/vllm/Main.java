@@ -252,7 +252,7 @@ public class Main {
     private static SamplingParams samplingParams(
             double temperature, int maxTokens, double topP, int topK,
             double repetitionPenalty, double frequencyPenalty, double presencePenalty) {
-        var sp = new SamplingParams()
+        var sp = new SamplingParams(java.lang.foreign.Arena.ofAuto())
                 .temperature(temperature)
                 .maxTokens(maxTokens)
                 .topP(topP);

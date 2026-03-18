@@ -46,14 +46,13 @@ import org.vllm.python.CPython;
 public final class GpuMemoryQuery {
 
     /** The GPU compute backends we support. */
-    public enum GpuBackend { CUDA, MPS, NONE }
+    public enum GpuBackend {
+        CUDA,
+        MPS,
+        NONE,
+    }
 
     private static volatile GpuBackend cachedBackend;
-
-    // Cached Python module references (borrowed from sys.modules after import)
-    private static volatile MemorySegment cachedTorchCuda;
-    private static volatile MemorySegment cachedTorchMps;
-    private static volatile MemorySegment cachedOsModule;
 
     private GpuMemoryQuery() {}
 
@@ -92,11 +91,18 @@ public final class GpuMemoryQuery {
      *
      * <p>Dispatches to the appropriate backend (CUDA or MPS).
      *
+     * <p><b>Important:</b> Returns {@code null} if the CPython runtime has not yet
+     * been initialized. This is safe to call at any time; if initialization is
+     * incomplete, it returns null rather than crashing.
+     *
      * @return a {@link GpuMemoryInfo} with {@code (freeBytes, totalBytes)},
-     *         or {@code null} if no GPU backend is available or any error occurs.
-     *         Never throws.
+     *         or {@code null} if no GPU backend is available, CPython is not yet
+     *         initialized, or any error occurs. Never throws.
      */
     public static GpuMemoryInfo query() {
+        if (!PythonRuntime.isInitialized()) {
+            return null;
+        }
         return switch (detectBackend()) {
             case CUDA -> queryCuda();
             case MPS -> queryMps();
@@ -117,8 +123,30 @@ public final class GpuMemoryQuery {
      */
     public static void emptyCache() {
         switch (detectBackend()) {
-            case CUDA -> callEmptyCache("torch.cuda");
-            case MPS -> callEmptyCache("torch.mps");
+            case CUDA -> callNoArgMethod("torch.cuda", "empty_cache");
+            case MPS -> callNoArgMethod("torch.mps", "empty_cache");
+            case NONE -> {}
+        }
+    }
+
+    /**
+     * Waits for all in-flight GPU operations to complete.
+     *
+     * <p>Calls {@code torch.cuda.synchronize()} (or the MPS equivalent).
+     * This is a full GPU pipeline stall — it blocks until every queued kernel,
+     * memcpy, and event completes.
+     *
+     * <p>Must be called <em>before</em> operations that modify the memory
+     * allocator state (like {@code CuMemAllocator.sleep()}) to ensure no
+     * pending CUDA captures or events reference memory that is about to be
+     * unmapped.
+     *
+     * <p>Best-effort — silently ignores errors.
+     */
+    public static void callSynchronize() {
+        switch (detectBackend()) {
+            case CUDA -> callNoArgMethod("torch.cuda", "synchronize");
+            case MPS -> callNoArgMethod("torch.mps", "synchronize");
             case NONE -> {}
         }
     }
@@ -141,14 +169,63 @@ public final class GpuMemoryQuery {
     public static void synchronizeAndEmptyCache() {
         switch (detectBackend()) {
             case CUDA -> {
-                callSynchronize("torch.cuda");
-                callEmptyCache("torch.cuda");
+                System.out.println("[vLLM4j] synchronizeAndEmptyCache: torch.cuda.synchronize()");
+                System.out.flush();
+                callNoArgMethod("torch.cuda", "synchronize");
+                System.out.println("[vLLM4j] synchronizeAndEmptyCache: torch.cuda.empty_cache()");
+                System.out.flush();
+                callNoArgMethod("torch.cuda", "empty_cache");
+                System.out.println("[vLLM4j] synchronizeAndEmptyCache: done");
+                System.out.flush();
             }
             case MPS -> {
-                callSynchronize("torch.mps");
-                callEmptyCache("torch.mps");
+                System.out.println("[vLLM4j] synchronizeAndEmptyCache: torch.mps.synchronize()");
+                System.out.flush();
+                callNoArgMethod("torch.mps", "synchronize");
+                System.out.println("[vLLM4j] synchronizeAndEmptyCache: torch.mps.empty_cache()");
+                System.out.flush();
+                callNoArgMethod("torch.mps", "empty_cache");
+                System.out.println("[vLLM4j] synchronizeAndEmptyCache: done");
+                System.out.flush();
             }
             case NONE -> {}
+        }
+    }
+
+    /**
+     * Performs aggressive memory cleanup suitable for calling after each inference request.
+     *
+     * <p>Performs multiple passes of:
+     * <ol>
+     *   <li>GPU synchronization and cache flushing (via {@link #synchronizeAndEmptyCache()})</li>
+     *   <li>Python garbage collection (multiple passes to break circular references)</li>
+     * </ol>
+     *
+     * <p>This method does NOT restart the engine or release model weights. It only
+     * cleans up temporary allocations and PyTorch-cached memory blocks.
+     *
+     * <p>Best-effort — silently ignores any errors.
+     *
+     * @see #synchronizeAndEmptyCache()
+     */
+    public static void aggressiveCacheCleanup() {
+        synchronizeAndEmptyCache();
+        forceGarbageCollection();
+    }
+
+    /**
+     * Forces Python garbage collection through multiple passes.
+     *
+     * <p>Runs {@code gc.collect()} multiple times (typically 3-5 iterations) to
+     * break circular references in the Python object graph that prevent
+     * automatic deallocation via reference counting alone. This is particularly
+     * effective for vLLM's scheduler ↔ model_runner ↔ cache_engine cycles.
+     *
+     * <p>Best-effort — silently ignores any errors.
+     */
+    private static void forceGarbageCollection() {
+        for (int i = 0; i < 5; i++) {
+            callNoArgMethod("gc", "collect");
         }
     }
 
@@ -156,32 +233,38 @@ public final class GpuMemoryQuery {
 
     private static GpuMemoryInfo queryCuda() {
         try (var gil = GIL.acquire(); Arena arena = Arena.ofConfined()) {
-            MemorySegment torchCuda = cachedTorchCuda;
-            if (torchCuda == null) {
-                torchCuda = CPython.PyImport_ImportModule(arena.allocateFrom("torch.cuda"));
-                if (PythonTypes.isNull(torchCuda)) { CPython.PyErr_Clear(); return null; }
-                cachedTorchCuda = torchCuda;
-            }
-            MemorySegment memGetInfo = PythonTypes.getAttr(arena, torchCuda, "mem_get_info");
-            if (PythonTypes.isNull(memGetInfo)) { CPython.PyErr_Clear(); return null; }
+            MemorySegment torchCuda = importModule(arena, "torch.cuda");
+            if (torchCuda == null) return null;
             try {
-                MemorySegment deviceArg = CPython.PyLong_FromLong(0L);
-                MemorySegment result = PythonCall.callOneArg(memGetInfo, deviceArg);
-                PythonTypes.decref(deviceArg);
-                if (PythonTypes.isNull(result)) { CPython.PyErr_Clear(); return null; }
+                MemorySegment memGetInfo = PythonTypes.getAttr(arena, torchCuda, "mem_get_info");
+                if (PythonTypes.isNull(memGetInfo)) {
+                    CPython.PyErr_Clear();
+                    return null;
+                }
                 try {
-                    MemorySegment pyFree = CPython.PySequence_GetItem(result, 0);
-                    MemorySegment pyTotal = CPython.PySequence_GetItem(result, 1);
-                    long free = CPython.PyLong_AsLong(pyFree);
-                    long total = CPython.PyLong_AsLong(pyTotal);
-                    PythonTypes.decref(pyFree);
-                    PythonTypes.decref(pyTotal);
-                    return new GpuMemoryInfo(free, total);
+                    MemorySegment deviceArg = CPython.PyLong_FromLong(0L);
+                    MemorySegment result = PythonCall.callOneArg(memGetInfo, deviceArg);
+                    PythonTypes.decref(deviceArg);
+                    if (PythonTypes.isNull(result)) {
+                        CPython.PyErr_Clear();
+                        return null;
+                    }
+                    try {
+                        MemorySegment pyFree = CPython.PySequence_GetItem(result, 0);
+                        MemorySegment pyTotal = CPython.PySequence_GetItem(result, 1);
+                        long free = CPython.PyLong_AsLong(pyFree);
+                        long total = CPython.PyLong_AsLong(pyTotal);
+                        PythonTypes.decref(pyFree);
+                        PythonTypes.decref(pyTotal);
+                        return new GpuMemoryInfo(free, total);
+                    } finally {
+                        PythonTypes.decref(result);
+                    }
                 } finally {
-                    PythonTypes.decref(result);
+                    PythonTypes.decref(memGetInfo);
                 }
             } finally {
-                PythonTypes.decref(memGetInfo);
+                PythonTypes.decref(torchCuda);
             }
         } catch (Exception e) {
             return null;
@@ -205,19 +288,22 @@ public final class GpuMemoryQuery {
             if (totalBytes <= 0) return null;
 
             // Current MPS allocation
-            MemorySegment torchMps = cachedTorchMps;
-            if (torchMps == null) {
-                torchMps = CPython.PyImport_ImportModule(arena.allocateFrom("torch.mps"));
-                if (PythonTypes.isNull(torchMps)) { CPython.PyErr_Clear(); return null; }
-                cachedTorchMps = torchMps;
+            MemorySegment torchMps = importModule(arena, "torch.mps");
+            if (torchMps == null) return null;
+            try {
+                MemorySegment fnName = PythonTypes.pyStr(arena, "current_allocated_memory");
+                MemorySegment pyAllocated = PythonCall.callMethodObjArgs(torchMps, fnName);
+                PythonTypes.decref(fnName);
+                if (PythonTypes.isNull(pyAllocated)) {
+                    CPython.PyErr_Clear();
+                    return null;
+                }
+                long allocated = CPython.PyLong_AsLong(pyAllocated);
+                PythonTypes.decref(pyAllocated);
+                return new GpuMemoryInfo(totalBytes - allocated, totalBytes);
+            } finally {
+                PythonTypes.decref(torchMps);
             }
-            MemorySegment fnName = PythonTypes.pyStr(arena, "current_allocated_memory");
-            MemorySegment pyAllocated = PythonCall.callMethodObjArgs(torchMps, fnName);
-            PythonTypes.decref(fnName);
-            if (PythonTypes.isNull(pyAllocated)) { CPython.PyErr_Clear(); return null; }
-            long allocated = CPython.PyLong_AsLong(pyAllocated);
-            PythonTypes.decref(pyAllocated);
-            return new GpuMemoryInfo(totalBytes - allocated, totalBytes);
         } catch (Exception e) {
             return null;
         }
@@ -227,47 +313,70 @@ public final class GpuMemoryQuery {
      * Reads total physical RAM via {@code os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')}.
      */
     private static long querySystemMemory(Arena arena) {
-        MemorySegment osModule = cachedOsModule;
-        if (osModule == null) {
-            osModule = CPython.PyImport_ImportModule(arena.allocateFrom("os"));
-            if (PythonTypes.isNull(osModule)) { CPython.PyErr_Clear(); return -1; }
-            cachedOsModule = osModule;
+        MemorySegment osModule = importModule(arena, "os");
+        if (osModule == null) return -1;
+        try {
+            MemorySegment sysconfName = PythonTypes.pyStr(arena, "sysconf");
+
+            MemorySegment pyPageSizeKey = PythonTypes.pyStr(arena, "SC_PAGE_SIZE");
+            MemorySegment pyPageSize = PythonCall.callMethodObjArgs(osModule, sysconfName, pyPageSizeKey);
+            PythonTypes.decref(pyPageSizeKey);
+            if (PythonTypes.isNull(pyPageSize)) {
+                PythonTypes.decref(sysconfName);
+                CPython.PyErr_Clear();
+                return -1;
+            }
+            long pageSize = CPython.PyLong_AsLong(pyPageSize);
+            PythonTypes.decref(pyPageSize);
+
+            MemorySegment pyPhysPagesKey = PythonTypes.pyStr(arena, "SC_PHYS_PAGES");
+            MemorySegment pyPhysPages = PythonCall.callMethodObjArgs(osModule, sysconfName, pyPhysPagesKey);
+            PythonTypes.decref(pyPhysPagesKey);
+            PythonTypes.decref(sysconfName);
+            if (PythonTypes.isNull(pyPhysPages)) {
+                CPython.PyErr_Clear();
+                return -1;
+            }
+            long physPages = CPython.PyLong_AsLong(pyPhysPages);
+            PythonTypes.decref(pyPhysPages);
+
+            return pageSize * physPages;
+        } finally {
+            PythonTypes.decref(osModule);
         }
-        MemorySegment sysconfName = PythonTypes.pyStr(arena, "sysconf");
-
-        MemorySegment pyPageSizeKey = PythonTypes.pyStr(arena, "SC_PAGE_SIZE");
-        MemorySegment pyPageSize = PythonCall.callMethodObjArgs(osModule, sysconfName, pyPageSizeKey);
-        PythonTypes.decref(pyPageSizeKey);
-        if (PythonTypes.isNull(pyPageSize)) { PythonTypes.decref(sysconfName); CPython.PyErr_Clear(); return -1; }
-        long pageSize = CPython.PyLong_AsLong(pyPageSize);
-        PythonTypes.decref(pyPageSize);
-
-        MemorySegment pyPhysPagesKey = PythonTypes.pyStr(arena, "SC_PHYS_PAGES");
-        MemorySegment pyPhysPages = PythonCall.callMethodObjArgs(osModule, sysconfName, pyPhysPagesKey);
-        PythonTypes.decref(pyPhysPagesKey);
-        PythonTypes.decref(sysconfName);
-        if (PythonTypes.isNull(pyPhysPages)) { CPython.PyErr_Clear(); return -1; }
-        long physPages = CPython.PyLong_AsLong(pyPhysPages);
-        PythonTypes.decref(pyPhysPages);
-
-        return pageSize * physPages;
     }
 
     // ── Shared helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Imports a Python module, returning a <em>new reference</em>.
+     * Returns {@code null} (never throws) if the import fails.
+     *
+     * <p>{@code PyImport_ImportModule} is backed by {@code sys.modules}, so
+     * repeated imports of the same module are effectively a dict lookup — no
+     * need to cache the result on the Java side.
+     */
+    private static MemorySegment importModule(Arena arena, String moduleName) {
+        MemorySegment module = CPython.PyImport_ImportModule(arena.allocateFrom(moduleName));
+        if (PythonTypes.isNull(module)) {
+            CPython.PyErr_Clear();
+            return null;
+        }
+        return module;
+    }
 
     /**
      * Checks {@code <module>.is_available()} for a torch backend module.
      * Must be called with the GIL held.
      */
     private static boolean checkTorchBackend(Arena arena, String moduleName) {
-        MemorySegment module = CPython.PyImport_ImportModule(arena.allocateFrom(moduleName));
-        if (PythonTypes.isNull(module)) { CPython.PyErr_Clear(); return false; }
+        MemorySegment module = importModule(arena, moduleName);
+        if (module == null) return false;
         try {
             MemorySegment fnName = PythonTypes.pyStr(arena, "is_available");
             MemorySegment pyResult = PythonCall.callMethodObjArgs(module, fnName);
             PythonTypes.decref(fnName);
-            boolean available = !PythonTypes.isNull(pyResult)
-                    && CPython.PyObject_IsTrue(pyResult) != 0;
+            boolean available = !PythonTypes.isNull(pyResult) && CPython.PyObject_IsTrue(pyResult) != 0;
             PythonTypes.decref(pyResult);
             return available;
         } finally {
@@ -276,48 +385,27 @@ public final class GpuMemoryQuery {
     }
 
     /**
-     * Calls {@code <module>.empty_cache()} on the given torch backend module.
-     * Best-effort — silently ignores errors.
-     */
-    private static void callEmptyCache(String moduleName) {
-        callNoArgMethod(moduleName, "empty_cache");
-    }
-
-    /**
-     * Calls {@code <module>.synchronize()} on the given torch backend module.
-     * Waits for all GPU operations to complete before returning.
-     * Best-effort — silently ignores errors.
-     */
-    private static void callSynchronize(String moduleName) {
-        callNoArgMethod(moduleName, "synchronize");
-    }
-
-    /**
-     * Calls a zero-argument method on a cached torch backend module.
-     * Best-effort — silently ignores errors.
+     * Calls a zero-argument method on a Python module.
+     *
+     * <p>Imports the module fresh each time (backed by {@code sys.modules},
+     * so this is effectively a dict lookup). This avoids the dangling-pointer
+     * issues of caching {@link MemorySegment} references to Python modules
+     * in static fields.
+     *
+     * <p>Best-effort — silently ignores errors.
      */
     private static void callNoArgMethod(String moduleName, String methodName) {
         try (var gil = GIL.acquire(); Arena tmp = Arena.ofConfined()) {
-            MemorySegment module;
-            if ("torch.cuda".equals(moduleName)) {
-                module = cachedTorchCuda;
-                if (module == null) {
-                    module = CPython.PyImport_ImportModule(tmp.allocateFrom(moduleName));
-                    if (PythonTypes.isNull(module)) { CPython.PyErr_Clear(); return; }
-                    cachedTorchCuda = module;
-                }
-            } else {
-                module = cachedTorchMps;
-                if (module == null) {
-                    module = CPython.PyImport_ImportModule(tmp.allocateFrom(moduleName));
-                    if (PythonTypes.isNull(module)) { CPython.PyErr_Clear(); return; }
-                    cachedTorchMps = module;
-                }
+            MemorySegment module = importModule(tmp, moduleName);
+            if (module == null) return;
+            try {
+                MemorySegment fnName = PythonTypes.pyStr(tmp, methodName);
+                MemorySegment result = PythonCall.callMethodObjArgs(module, fnName);
+                PythonTypes.decref(result);
+                PythonTypes.decref(fnName);
+            } finally {
+                PythonTypes.decref(module);
             }
-            MemorySegment fnName = PythonTypes.pyStr(tmp, methodName);
-            MemorySegment result = PythonCall.callMethodObjArgs(module, fnName);
-            PythonTypes.decref(result);
-            PythonTypes.decref(fnName);
         } catch (Exception e) {
             CPython.PyErr_Clear();
         }

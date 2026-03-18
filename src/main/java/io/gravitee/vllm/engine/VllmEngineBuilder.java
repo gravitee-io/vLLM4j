@@ -5,6 +5,7 @@ import io.gravitee.vllm.platform.PlatformResolver;
 import io.gravitee.vllm.platform.VllmBackend;
 import io.gravitee.vllm.runtime.PythonRuntime;
 
+import java.lang.foreign.Arena;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -53,6 +54,12 @@ public final class VllmEngineBuilder {
 
     /** Runtime initialized by {@link #initRuntime()}, reused by {@link #build()}. */
     private PythonRuntime runtime;
+
+    /**
+     * Shared arena for all native memory allocations. Must outlive the engine.
+     * If not set, the builder creates a {@link Arena#ofAuto()} arena.
+     */
+    private Arena arena;
 
     /** Package-private: obtain via {@link VllmEngine#builder()}. */
     VllmEngineBuilder() {}
@@ -241,6 +248,21 @@ public final class VllmEngineBuilder {
     }
 
     /**
+     * Sets the shared {@link Arena} for all native memory allocations.
+     *
+     * <p>The arena must outlive the engine. If not set, the builder creates
+     * a {@link Arena#ofAuto()} arena that is garbage-collected when no longer
+     * referenced.
+     *
+     * @param arena the arena to use for native allocations
+     * @return this builder (for chaining)
+     */
+    public VllmEngineBuilder arena(Arena arena) {
+        this.arena = arena;
+        return this;
+    }
+
+    /**
      * Initializes the CPython runtime (and releases the GIL) without loading
      * the model.
      *
@@ -273,7 +295,8 @@ public final class VllmEngineBuilder {
      */
     public VllmEngine build() {
         initRuntime();
-        return new VllmEngine(this);
+        Arena resolvedArena = (arena != null) ? arena : Arena.ofAuto();
+        return new VllmEngine(resolvedArena, this);
     }
 
     // ── Venv auto-detection ────────────────────────────────────────────────

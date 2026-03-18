@@ -87,7 +87,7 @@ class VllmIteratorTest {
     void single_conversation_generates_tokens() {
         String prompt = renderPrompt(SYSTEM, "What is the capital of France?");
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(256)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(256)) {
             var request = new VllmRequest("req-1", prompt, sp);
             var state = new ConversationState()
                     .reasoning("<think>", "</think>");
@@ -145,7 +145,7 @@ class VllmIteratorTest {
 
         for (int i = 0; i < 3; i++) {
             String prompt = renderPrompt(SYSTEM, questions[i]);
-            try (var sp = new SamplingParams().temperature(0.0).maxTokens(256)) {
+            try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(256)) {
                 var request = new VllmRequest(requestIds[i], prompt, sp);
                 iterator.addRequest(request, states[i]);
             }
@@ -197,7 +197,7 @@ class VllmIteratorTest {
     void deltas_concatenate_to_full_text() {
         String prompt = renderPrompt(SYSTEM, "What is the capital of Germany?");
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(30)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(30)) {
             var request = new VllmRequest("req-deltas", prompt, sp);
             var iterator = new VllmIterator(engine);
             iterator.addRequest(request);
@@ -223,8 +223,8 @@ class VllmIteratorTest {
         String prompt1 = renderPrompt(SYSTEM, "What is the capital of Italy?");
         String prompt2 = renderPrompt(SYSTEM, "What is the capital of Spain?");
 
-        try (var sp1 = new SamplingParams().temperature(0.0).maxTokens(20);
-             var sp2 = new SamplingParams().temperature(0.0).maxTokens(20)) {
+        try (var sp1 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(20);
+             var sp2 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(20)) {
 
             var iterator = new VllmIterator(engine);
             iterator.addRequest(new VllmRequest("req-italy", prompt1, sp1));
@@ -262,8 +262,8 @@ class VllmIteratorTest {
         String prompt1 = renderPrompt(SYSTEM, "What is the capital of Japan?");
         String prompt2 = renderPrompt(SYSTEM, "What is the capital of Brazil?");
 
-        try (var sp1 = new SamplingParams().temperature(0.0).maxTokens(15);
-             var sp2 = new SamplingParams().temperature(0.0).maxTokens(15)) {
+        try (var sp1 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(15);
+             var sp2 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(15)) {
 
             var iterator = new VllmIterator(engine);
             iterator.addRequest(new VllmRequest("req-japan", prompt1, sp1));
@@ -299,8 +299,8 @@ class VllmIteratorTest {
                 .reasoning("<think>", "</think>");
         // req-2 has no classification
 
-        try (var sp1 = new SamplingParams().temperature(0.0).maxTokens(30);
-             var sp2 = new SamplingParams().temperature(0.0).maxTokens(30)) {
+        try (var sp1 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(30);
+             var sp2 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(30)) {
 
             var iterator = new VllmIterator(engine);
             iterator.addRequest(new VllmRequest("req-canada", prompt1, sp1), state1);
@@ -338,7 +338,7 @@ class VllmIteratorTest {
     void stop_halts_iteration() {
         String prompt = renderPrompt(SYSTEM, "Count from 1 to 100");
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(100)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(100)) {
             var request = new VllmRequest("req-stop", prompt, sp);
             var iterator = new VllmIterator(engine);
             iterator.addRequest(request);
@@ -366,7 +366,7 @@ class VllmIteratorTest {
     void blocking_generate_returns_final_output() {
         String prompt = renderPrompt(SYSTEM, "What is the capital of Sweden?");
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(30)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(30)) {
             var request = new VllmRequest("req-generate", prompt, sp);
 
             RequestOutput output = engine.generate(request);
@@ -395,7 +395,7 @@ class VllmIteratorTest {
     void logprobs_should_be_extracted() {
         String prompt = renderPrompt(SYSTEM, "What is the capital of Mexico?");
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(20).logprobs(5)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(20).logprobs(5)) {
             var request = new VllmRequest("req-logprobs", prompt, sp);
 
             RequestOutput output = engine.generate(request);
@@ -571,7 +571,7 @@ class VllmIteratorTest {
                 ChatMessage.user("What is the weather in Tokyo?")
         ), List.of(tool), true);
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(300)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(300)) {
             var request = new VllmRequest("req-tools", prompt, sp);
             var output = engine.generate(request);
 
@@ -641,7 +641,7 @@ class VllmIteratorTest {
 
          // Generate first response (may use tools or answer directly)
          String prompt1 = chatTemplate.render(messages, tools, true);
-         try (var sp = new SamplingParams().temperature(0.0).maxTokens(128)) {
+         try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(128)) {
              var request1 = new VllmRequest("tool-conv-1", prompt1, sp);
              var iterator1 = new VllmIterator(engine);
              iterator1.addRequest(request1);
@@ -672,7 +672,7 @@ class VllmIteratorTest {
 
                  // Second turn: Re-render with tool result and generate final answer
                  String prompt2 = chatTemplate.render(messages, tools, true);
-                 try (var sp2 = new SamplingParams().temperature(0.0).maxTokens(64)) {
+                 try (var sp2 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(64)) {
                      var request2 = new VllmRequest("tool-conv-2", prompt2, sp2);
                      var iterator2 = new VllmIterator(engine);
                      iterator2.addRequest(request2);
@@ -714,7 +714,7 @@ class VllmIteratorTest {
          var state = new ConversationState()
                  .toolCall("<tool_call>", "</tool_call>");
 
-         try (var sp = new SamplingParams().temperature(0.0).maxTokens(256)) {
+         try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(256)) {
              var request = new VllmRequest("tool-stream-tag", prompt, sp);
              var iterator = new VllmIterator(engine);
              iterator.addRequest(request, state);
@@ -779,8 +779,8 @@ class VllmIteratorTest {
 
          var iterator = new VllmIterator(engine);
 
-         try (var sp1 = new SamplingParams().temperature(0.0).maxTokens(64);
-              var sp2 = new SamplingParams().temperature(0.0).maxTokens(64)) {
+         try (var sp1 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(64);
+              var sp2 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(64)) {
 
              iterator.addRequest(new VllmRequest("tool-france", prompt1, sp1));
              iterator.addRequest(new VllmRequest("tool-japan", prompt2, sp2));

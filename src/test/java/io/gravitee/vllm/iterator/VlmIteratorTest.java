@@ -87,7 +87,7 @@ class VlmIteratorTest {
 
         var mmData = new MultiModalData().addImage(imageBytes);
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(32)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(32)) {
             var request = new VllmRequest("req-vlm-dog", prompt, sp, mmData);
 
             RequestOutput output = engine.generate(request);
@@ -128,7 +128,7 @@ class VlmIteratorTest {
 
         var mmData = new MultiModalData().addImage(imageBytes);
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(64)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(64)) {
             var request = new VllmRequest("req-vlm-stream", prompt, sp, mmData);
             var state = new ConversationState()
                     .reasoning("<think>", "</think>");

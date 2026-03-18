@@ -48,13 +48,15 @@ public final class SamplingParams implements AutoCloseable, Freeable {
      * Lazily imports and caches the {@code vllm.sampling_params.SamplingParams}
      * Python class. Thread-safe (double-checked locking).
      * <p>Must be called with the GIL held (or from within a GIL-protected scope).
+     *
+     * @param arena arena for native string allocation during the import
      */
-    private static MemorySegment ensureClass() {
+    private static MemorySegment ensureClass(Arena arena) {
         if (samplingParamsClass == null) {
             synchronized (SamplingParams.class) {
                 if (samplingParamsClass == null) {
                     samplingParamsClass = PythonCall.importClass(
-                            Arena.ofAuto(), "vllm.sampling_params", "SamplingParams");
+                            arena, "vllm.sampling_params", "SamplingParams");
                 }
             }
         }
@@ -63,7 +65,7 @@ public final class SamplingParams implements AutoCloseable, Freeable {
 
     // ── Instance state ──────────────────────────────────────────────────
 
-    private final Arena arena = Arena.ofAuto();
+    private final Arena arena;
 
     /** Accumulates kwargs until the Python object is built. */
     private MemorySegment kwargs;
@@ -78,8 +80,11 @@ public final class SamplingParams implements AutoCloseable, Freeable {
     /**
      * Creates a new SamplingParams builder with no parameters set.
      * All values will inherit vLLM's Python-side defaults.
+     *
+     * @param arena shared arena for native memory allocation (must outlive this object)
      */
-    public SamplingParams() {
+    public SamplingParams(Arena arena) {
+        this.arena = arena;
         try (var gil = GIL.acquire()) {
             this.kwargs = CPython.PyDict_New();
         }
@@ -447,7 +452,7 @@ public final class SamplingParams implements AutoCloseable, Freeable {
         checkNotFreed();
         if (pyObject == null) {
             try (var gil = GIL.acquire()) {
-                pyObject = PythonCall.callWithKwargs(ensureClass(), kwargs);
+                pyObject = PythonCall.callWithKwargs(ensureClass(arena), kwargs);
                 PythonErrors.checkPythonError("SamplingParams() construction");
                 PythonTypes.decref(kwargs);
                 kwargs = null; // signal "built"

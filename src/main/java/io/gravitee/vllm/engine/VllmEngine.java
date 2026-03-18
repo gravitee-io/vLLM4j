@@ -5,6 +5,7 @@ import io.gravitee.vllm.binding.PythonErrors;
 import io.gravitee.vllm.binding.PythonTypes;
 import io.gravitee.vllm.binding.VllmException;
 import io.gravitee.vllm.runtime.GIL;
+import io.gravitee.vllm.runtime.PythonRuntime;
 
 import org.vllm.python.CPython;
 
@@ -51,7 +52,7 @@ public final class VllmEngine implements AutoCloseable {
 
     private final MemorySegment engine;
     private final MemorySegment jinja2Module;
-    private final Arena arena = Arena.ofAuto();
+    private final Arena arena;
 
     /** Cached chat template string from the model's tokenizer. */
     private String chatTemplate;
@@ -67,10 +68,12 @@ public final class VllmEngine implements AutoCloseable {
     /**
      * Creates an {@code LLMEngine} instance using the given runtime.
      *
+     * @param arena shared arena for native memory allocation (must outlive this engine)
      * @param model   HuggingFace model id, e.g. {@code "Qwen/Qwen3-0.6B"}
      * @param dtype   torch dtype string, e.g. {@code "auto"} or {@code "float32"}
      */
-    public VllmEngine(String model, String dtype) {
+    public VllmEngine(Arena arena, String model, String dtype) {
+        this.arena = arena;
         try (var gil = GIL.acquire()) {
             MemorySegment engineArgsClass  = PythonCall.importClass(arena, "vllm.engine.arg_utils", "EngineArgs");
             MemorySegment engineArgsKwargs = buildEngineArgsKwargs(model, dtype);
@@ -100,15 +103,18 @@ public final class VllmEngine implements AutoCloseable {
             this.engine = eng;
             this.jinja2Module = jinja2;
         }
+        PythonRuntime.registerEngine();
     }
 
     /**
      * Creates an {@code LLMEngine} from a builder, applying all configured
      * engine parameters.
      *
+     * @param arena   shared arena for native memory allocation (must outlive this engine)
      * @param builder the builder containing engine configuration
      */
-    VllmEngine(VllmEngineBuilder builder) {
+    VllmEngine(Arena arena, VllmEngineBuilder builder) {
+        this.arena = arena;
         try (var gil = GIL.acquire()) {
             MemorySegment engineArgsClass  = PythonCall.importClass(arena, "vllm.engine.arg_utils", "EngineArgs");
             MemorySegment engineArgsKwargs = buildEngineArgsKwargs(builder);
@@ -138,6 +144,7 @@ public final class VllmEngine implements AutoCloseable {
             this.engine = eng;
             this.jinja2Module = jinja2;
         }
+        PythonRuntime.registerEngine();
     }
 
     // ── LLMEngine operations ───────────────────────────────────────────────
@@ -558,13 +565,84 @@ public final class VllmEngine implements AutoCloseable {
         }
     }
 
+    // ── Memory management ─────────────────────────────────────────────────────
+
+    /**
+     * Releases GPU memory cached by PyTorch without destroying the engine.
+     *
+     * <p>Suitable for calling between inference requests to free temporary GPU
+     * allocations. This does NOT restart the engine or release model weights —
+     * only cached memory blocks that PyTorch's allocator is holding.
+     *
+     * <p>Performs:
+     * <ol>
+     *   <li>Synchronizes pending GPU operations (ensures all kernels complete)</li>
+     *   <li>Flushes PyTorch's memory cache via {@code torch.cuda.empty_cache()}</li>
+     * </ol>
+     *
+     * <p>Best-effort — silently ignores errors (e.g., if CUDA is unavailable).
+     *
+     * @see GpuMemoryQuery#synchronizeAndEmptyCache()
+     */
+    public void freeCache() {
+        checkNotClosed();
+        GpuMemoryQuery.synchronizeAndEmptyCache();
+    }
+
+    /**
+     * Queries the current GPU memory usage.
+     *
+     * @return a {@link GpuMemoryQuery.GpuMemoryInfo} with free and total bytes,
+     *         or {@code null} if GPU memory cannot be queried (e.g., CUDA unavailable)
+     * @see GpuMemoryQuery#query()
+     */
+    public GpuMemoryQuery.GpuMemoryInfo queryMemory() {
+        return GpuMemoryQuery.query();
+    }
+
+    /**
+     * Performs aggressive memory cleanup without restarting the engine.
+     *
+     * <p>This is a heavier-weight cleanup than {@link #freeCache()}, suitable for
+     * periodic maintenance (e.g., every N requests or every T seconds).
+     *
+     * <p>Performs:
+     * <ol>
+     *   <li>GPU synchronization and cache flushing (via {@link #freeCache()})</li>
+     *   <li>Multiple passes of Python garbage collection to break circular references</li>
+     * </ol>
+     *
+     * <p>Does NOT restart the engine or release model weights.
+     *
+     * <p>Best-effort — silently ignores errors.
+     *
+     * @see GpuMemoryQuery#aggressiveCacheCleanup()
+     */
+    public void reset() {
+        checkNotClosed();
+        GpuMemoryQuery.aggressiveCacheCleanup();
+    }
+
     // ── AutoCloseable ──────────────────────────────────────────────────────
 
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) return;
+        System.out.println("[vLLM4j] VllmEngine.close() — begin teardown");
+        System.out.flush();
+
+        // Stop the keepalive thread BEFORE tearing down Python objects.
+        // vLLM's shutdown may invalidate Python thread states that the
+        // keepalive thread touches via PyGILState_Ensure — if the keepalive
+        // fires between shutdownEngineCore() and gc.collect(), it segfaults.
+        PythonRuntime.unregisterEngine();
+        System.out.println("[vLLM4j] close: keepalive stopped");
+        System.out.flush();
 
         try (var gil = GIL.acquire()) {
+            System.out.println("[vLLM4j] close: GIL acquired");
+            System.out.flush();
+
             // Release cached LoRA helpers (if they were lazily initialized).
             if (loraPathResolver != null) {
                 PythonTypes.decref(loraPathResolver);
@@ -575,89 +653,228 @@ public final class VllmEngine implements AutoCloseable {
                 loraRequestClass = null;
             }
 
-            // Explicitly shut down the engine's internals via the Python API.
-            // engine_core.shutdown() tears down the model executor, scheduler,
-            // and worker — releasing GPU tensors. This mirrors what vLLM's own
-            // LLMEngine.__del__() does.
+            System.out.println("[vLLM4j] close: putting engine to sleep (release GPU memory via CuMemAllocator)");
+            System.out.flush();
+            sleepEngine();
+            System.out.println("[vLLM4j] close: sleep done");
+            System.out.flush();
+
+            System.out.println("[vLLM4j] close: calling shutdownEngineCore()");
+            System.out.flush();
             shutdownEngineCore();
+            System.out.println("[vLLM4j] close: shutdownEngineCore() done");
+            System.out.flush();
 
-            // Use Python's 'del engine' equivalent: run exec("del engine")
-            // with the engine in a temporary namespace. This triggers
-            // LLMEngine.__del__() immediately (if refcount drops to zero)
-            // rather than deferring to garbage collection.
-            deleteViaPython(engine);
+            System.out.println("[vLLM4j] close: decref(engine)");
+            System.out.flush();
+            PythonTypes.decref(engine);
+            System.out.println("[vLLM4j] close: decref(engine) done");
+            System.out.flush();
 
-            // Release the jinja2 module reference.
+            System.out.println("[vLLM4j] close: decref(jinja2Module)");
+            System.out.flush();
             PythonTypes.decref(jinja2Module);
 
-            // Force multiple Python garbage collection passes to break circular
-            // references (scheduler ↔ model_runner ↔ cache_engine cycles) that
-            // prevent automatic deallocation via reference counting alone.
-            // A single gc.collect() may not resolve multi-level cycles.
+            System.out.println("[vLLM4j] close: gc.collect() pass 1");
+            System.out.flush();
             collectGarbage();
+            System.out.println("[vLLM4j] close: gc.collect() pass 2");
+            System.out.flush();
             collectGarbage();
+            System.out.println("[vLLM4j] close: gc.collect() pass 3");
+            System.out.flush();
             collectGarbage();
+            System.out.println("[vLLM4j] close: gc.collect() done, releasing GIL");
+            System.out.flush();
         }
 
-        // Wait for any in-flight GPU operations, then flush PyTorch's caching
-        // allocator so VRAM is actually returned to the driver.
-        // On MPS/CPU the synchronize is a no-op; on CUDA it ensures all
-        // kernels and memcpys complete before we release the memory blocks.
+        System.out.println("[vLLM4j] close: calling synchronizeAndEmptyCache()");
+        System.out.flush();
         GpuMemoryQuery.synchronizeAndEmptyCache();
+        System.out.println("[vLLM4j] close: synchronizeAndEmptyCache() done — teardown complete");
+        System.out.flush();
     }
 
     /**
-     * Calls {@code engine.engine_core.shutdown()} to tear down the model
-     * executor and release GPU resources from the Python side.
+     * Clears the {@code CuMemAllocator}'s stale state so a new engine can
+     * be created in the same process.
      *
-     * <p>Best-effort — silently ignores errors (e.g. if the engine has no
-     * {@code engine_core} attribute, or if {@code shutdown()} is not available).
+     * <p>After {@code sleep()}, the allocator's {@code pointer_to_data} dict
+     * still has entries (handles that were unmapped but not removed from the
+     * dict). The next engine's {@code load_model()} asserts
+     * {@code get_current_usage() == 0} and fails with "Sleep mode can only
+     * be used for one instance per process."
+     *
+     * <p>We clear only {@code pointer_to_data} — the entries are stale
+     * (GPU memory was already unmapped by {@code sleep()}), and their CPU
+     * backup tensors are freed when the dict is cleared.
+     *
+     * <p>We do <em>not</em> clear {@code allocator_and_pools} or reset the
+     * singleton. The PyTorch pluggable allocator pools are C-level objects
+     * that must persist — creating new ones would allocate additional GPU
+     * memory instead of reusing the existing pools.
+     *
+     * <p>Best-effort — silently ignores errors.
      */
-    private void shutdownEngineCore() {
-        try {
-            MemorySegment engineCore = PythonTypes.getAttr(arena, engine, "engine_core");
-            if (!PythonTypes.isNull(engineCore) && !PythonTypes.isNone(engineCore)) {
-                // engine_core may be an InprocClient wrapping the real EngineCore
-                MemorySegment innerCore = PythonTypes.getAttr(arena, engineCore, "engine_core");
-                MemorySegment target = (!PythonTypes.isNull(innerCore) && !PythonTypes.isNone(innerCore))
-                        ? innerCore : engineCore;
-                MemorySegment shutdownName = PythonTypes.pyStr(arena, "shutdown");
-                MemorySegment result = PythonCall.callMethodObjArgs(target, shutdownName);
-                PythonTypes.decref(result);
-                PythonTypes.decref(shutdownName);
-                if (target != engineCore) PythonTypes.decref(innerCore);
+    private void resetCuMemAllocator() {
+        try (Arena tmp = Arena.ofConfined()) {
+            MemorySegment cumemModule = CPython.PyImport_ImportModule(
+                    tmp.allocateFrom("vllm.device_allocator.cumem"));
+            if (PythonTypes.isNull(cumemModule)) {
+                CPython.PyErr_Clear();
+                return;
             }
-            PythonTypes.decref(engineCore);
+            MemorySegment cls = PythonTypes.getAttr(tmp, cumemModule, "CuMemAllocator");
+            if (PythonTypes.isNull(cls) || PythonTypes.isNone(cls)) {
+                PythonTypes.decref(cls);
+                PythonTypes.decref(cumemModule);
+                return;
+            }
+            MemorySegment instance = PythonTypes.getAttr(tmp, cls, "instance");
+            if (!PythonTypes.isNull(instance) && !PythonTypes.isNone(instance)) {
+                // Clear pointer_to_data dict — stale entries from sleep()
+                MemorySegment pointerToData = PythonTypes.getAttr(tmp, instance, "pointer_to_data");
+                if (!PythonTypes.isNull(pointerToData) && !PythonTypes.isNone(pointerToData)) {
+                    MemorySegment clearName = PythonTypes.pyStr(tmp, "clear");
+                    MemorySegment clearResult = PythonCall.callMethodObjArgs(pointerToData, clearName);
+                    PythonTypes.decref(clearResult);
+                    PythonTypes.decref(clearName);
+                    PythonTypes.decref(pointerToData);
+                }
+                PythonTypes.decref(instance);
+            }
+            PythonTypes.decref(cls);
+            PythonTypes.decref(cumemModule);
         } catch (Exception e) {
+            System.out.println("[vLLM4j] resetCuMemAllocator: EXCEPTION — " + e.getMessage());
+            System.out.flush();
             CPython.PyErr_Clear();
         }
     }
 
     /**
-     * Performs the equivalent of Python's {@code del obj} by placing the object
-     * in a temporary namespace dict and executing {@code exec("del __o", ns)}.
+     * Puts the engine to sleep, releasing GPU memory via vLLM's
+     * {@code CuMemAllocator}.
      *
-     * <p>This triggers the object's {@code __del__} immediately if our reference
-     * was the last one. Also decrefs our own Java-side reference.
+     * <p>vLLM V1 uses a custom CUDA allocator ({@code CuMemAllocator}) that
+     * manages GPU memory via {@code cuMemCreate}/{@code cuMemMap} instead of
+     * {@code cudaMalloc}. Standard {@code torch.cuda.empty_cache()} only
+     * flushes PyTorch's default caching allocator and has <em>no effect</em>
+     * on CuMemAllocator-managed memory.
      *
-     * <p>Best-effort — falls back to a plain {@code decref} on any error.
+     * <p>The {@code sleep(level=1)} method unmaps physical GPU memory, offloads
+     * model weights to CPU, and releases KV cache back to the driver.
+     *
+     * <p>Best-effort — silently ignores errors.
      */
-    private void deleteViaPython(MemorySegment pyObject) {
+    private void sleepEngine() {
         try (Arena tmp = Arena.ofConfined()) {
-            MemorySegment ns = CPython.PyDict_New();
-            PythonTypes.putDictObj(tmp, ns, "__o", pyObject);
-            MemorySegment code = PythonTypes.pyStr(tmp, "del __o");
-            MemorySegment builtins = CPython.PyImport_ImportModule(tmp.allocateFrom("builtins"));
-            MemorySegment execFn = PythonTypes.getAttr(tmp, builtins, "exec");
-            MemorySegment result = PythonCall.callMethodObjArgs(execFn, code, ns);
-            PythonTypes.decref(result);
-            PythonTypes.decref(execFn);
-            PythonTypes.decref(builtins);
-            PythonTypes.decref(ns);
-            PythonTypes.decref(code);
+            // Navigate: engine → engine_core (InprocClient) → engine_core (EngineCore)
+            MemorySegment client = PythonTypes.getAttr(tmp, engine, "engine_core");
+            if (PythonTypes.isNull(client) || PythonTypes.isNone(client)) {
+                System.out.println("[vLLM4j] sleepEngine: no engine_core, skipping");
+                System.out.flush();
+                PythonTypes.decref(client);
+                return;
+            }
+            MemorySegment core = PythonTypes.getAttr(tmp, client, "engine_core");
+            if (PythonTypes.isNull(core) || PythonTypes.isNone(core)) {
+                System.out.println("[vLLM4j] sleepEngine: no inner engine_core, skipping");
+                System.out.flush();
+                PythonTypes.decref(core);
+                PythonTypes.decref(client);
+                return;
+            }
+            MemorySegment executor = PythonTypes.getAttr(tmp, core, "model_executor");
+            if (PythonTypes.isNull(executor) || PythonTypes.isNone(executor)) {
+                System.out.println("[vLLM4j] sleepEngine: no model_executor, skipping");
+                System.out.flush();
+                PythonTypes.decref(executor);
+                PythonTypes.decref(core);
+                PythonTypes.decref(client);
+                return;
+            }
+
+            // Call: executor.collective_rpc("sleep", args=(1,))
+            MemorySegment sleepStr = PythonTypes.pyStr(tmp, "sleep");
+            MemorySegment levelOne = CPython.PyLong_FromLong(1L);
+            MemorySegment innerArgs = PythonCall.makeTuple(levelOne);
+            PythonTypes.decref(levelOne);
+
+            // Build kwargs dict: {"args": (1,)}
+            MemorySegment kwargs = CPython.PyDict_New();
+            CPython.PyDict_SetItemString(kwargs, tmp.allocateFrom("args"), innerArgs);
+
+            // Build positional args: ("sleep",)
+            MemorySegment posArgs = PythonCall.makeTuple(sleepStr);
+
+            // Call: executor.collective_rpc("sleep", args=(1,))
+            // Using PyObject_Call on the bound method
+            MemorySegment method = PythonTypes.getAttr(tmp, executor, "collective_rpc");
+            if (!PythonTypes.isNull(method)) {
+                MemorySegment result = PythonCall.pyObjectCall(method, posArgs, kwargs);
+                if (PythonTypes.isNull(result)) {
+                    System.out.println("[vLLM4j] sleepEngine: collective_rpc('sleep') failed, clearing error");
+                    System.out.flush();
+                    CPython.PyErr_Clear();
+                } else {
+                    System.out.println("[vLLM4j] sleepEngine: sleep(1) succeeded — GPU memory released");
+                    System.out.flush();
+                    PythonTypes.decref(result);
+                }
+                PythonTypes.decref(method);
+            }
+
+            PythonTypes.decref(posArgs);
+            PythonTypes.decref(kwargs);
+            PythonTypes.decref(innerArgs);
+            PythonTypes.decref(sleepStr);
+            PythonTypes.decref(executor);
+            PythonTypes.decref(core);
+            PythonTypes.decref(client);
         } catch (Exception e) {
-            // Fallback: just decref directly
-            PythonTypes.decref(pyObject);
+            System.out.println("[vLLM4j] sleepEngine: EXCEPTION — " + e.getMessage());
+            System.out.flush();
+            CPython.PyErr_Clear();
+        }
+    }
+
+    /**
+     * Calls {@code engine.engine_core.engine_core.model_executor.shutdown()}
+     * to tear down the model executor and release GPU resources.
+     *
+     * <p>Best-effort — silently ignores errors.
+     */
+    private void shutdownEngineCore() {
+        try {
+            System.out.println("[vLLM4j] shutdownEngineCore: getAttr(engine, 'engine_core')");
+            System.out.flush();
+            MemorySegment engineCore = PythonTypes.getAttr(arena, engine, "engine_core");
+            if (!PythonTypes.isNull(engineCore) && !PythonTypes.isNone(engineCore)) {
+                System.out.println("[vLLM4j] shutdownEngineCore: getAttr(engineCore, 'engine_core') [inner]");
+                System.out.flush();
+                // engine_core may be an InprocClient wrapping the real EngineCore
+                MemorySegment innerCore = PythonTypes.getAttr(arena, engineCore, "engine_core");
+                MemorySegment target = (!PythonTypes.isNull(innerCore) && !PythonTypes.isNone(innerCore))
+                        ? innerCore : engineCore;
+                System.out.println("[vLLM4j] shutdownEngineCore: calling shutdown() on " +
+                        (target == innerCore ? "inner engine_core" : "engine_core"));
+                System.out.flush();
+                MemorySegment shutdownName = PythonTypes.pyStr(arena, "shutdown");
+                MemorySegment result = PythonCall.callMethodObjArgs(target, shutdownName);
+                System.out.println("[vLLM4j] shutdownEngineCore: shutdown() returned");
+                System.out.flush();
+                PythonTypes.decref(result);
+                PythonTypes.decref(shutdownName);
+                if (target != engineCore) PythonTypes.decref(innerCore);
+            } else {
+                System.out.println("[vLLM4j] shutdownEngineCore: engine_core is null/None, skipping");
+                System.out.flush();
+            }
+            PythonTypes.decref(engineCore);
+        } catch (Exception e) {
+            System.out.println("[vLLM4j] shutdownEngineCore: EXCEPTION — " + e.getMessage());
+            System.out.flush();
             CPython.PyErr_Clear();
         }
     }
@@ -752,6 +969,11 @@ public final class VllmEngine implements AutoCloseable {
             PythonTypes.putDictObj(arena, kwargs, "kv_cache_dtype", pyKvDtype);
             PythonTypes.decref(pyKvDtype);
         }
+
+        // Enable sleep mode so that vLLM allocates GPU memory through
+        // CuMemAllocator (cuMemCreate/cuMemMap) instead of cudaMalloc.
+        // Required for sleepEngine() to release GPU memory on close().
+        PythonTypes.putDictObj(arena, kwargs, "enable_sleep_mode", PythonTypes.pyTrue());
 
         return kwargs;
     }

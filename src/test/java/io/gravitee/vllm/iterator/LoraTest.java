@@ -87,7 +87,7 @@ class LoraTest {
                 ChatMessage.user("Show all employees with salary greater than 50000")
         ), true);
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(128)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(128)) {
             var request = new VllmRequest("req-lora-sql", prompt, sp, lora);
             RequestOutput output = engine.generate(request);
 
@@ -118,7 +118,7 @@ class LoraTest {
                 ChatMessage.user("What is the capital of France? /no_think")
         ), true);
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(64)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(64)) {
             var request = new VllmRequest("req-base", prompt, sp);
             RequestOutput output = engine.generate(request);
 
@@ -146,7 +146,7 @@ class LoraTest {
                 ChatMessage.user("List all products with price less than 10")
         ), true);
 
-        try (var sp = new SamplingParams().temperature(0.0).maxTokens(64)) {
+        try (var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(64)) {
             var request = new VllmRequest("req-lora-stream", prompt, sp, lora);
             var iterator = new VllmIterator(engine);
             iterator.addRequest(request);
@@ -181,8 +181,8 @@ class LoraTest {
 
         var iterator = new VllmIterator(engine);
 
-        try (var sp1 = new SamplingParams().temperature(0.0).maxTokens(64);
-             var sp2 = new SamplingParams().temperature(0.0).maxTokens(64)) {
+        try (var sp1 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(64);
+             var sp2 = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(64)) {
 
             // Submit LoRA request and base model request in parallel
             iterator.addRequest(new VllmRequest("req-lora-parallel", loraPrompt, sp1, lora));

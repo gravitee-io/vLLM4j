@@ -16,6 +16,8 @@ import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * Manages the embedded CPython interpreter lifecycle.
@@ -40,6 +42,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * allocator. The ~100-300 MB CUDA context overhead persists but is reused by
  * subsequent model loads.
  *
+ * <h2>Keepalive thread</h2>
+ * <p>A dedicated daemon thread periodically acquires the GIL and performs a
+ * trivial CPython operation ({@code id(None)}). This prevents the CUDA context
+ * and Python thread state from going stale during long idle periods — without
+ * it, the JVM may reap the thread that called {@code Py_InitializeEx},
+ * causing {@code PyGILState_Ensure} to operate on a dead thread state, which
+ * leads to segfaults on the next engine call.
+ *
  * <h2>GIL contract</h2>
  * <p>The GIL is acquired during {@code Py_InitializeEx}. After initialization
  * completes (sys.path setup, sys.executable fix), the GIL is <em>released</em>
@@ -53,6 +63,47 @@ public final class PythonRuntime implements AutoCloseable {
 
     /** Tracks whether CPython has been initialized (and GIL released). */
     private static final AtomicBoolean INITIALIZED = new AtomicBoolean(false);
+
+    /** Keepalive interval — how often to ping CPython (30 seconds). */
+    private static final long KEEPALIVE_INTERVAL_NS = 30_000_000_000L;
+
+    /** Keepalive daemon thread. Started once on first initialization. */
+    private static volatile Thread keepaliveThread;
+
+    /** Flag to stop the keepalive thread (set when last engine closes). */
+    private static final AtomicBoolean KEEPALIVE_STOPPED = new AtomicBoolean(false);
+
+    /** Number of live VllmEngine instances. Keepalive runs while > 0. */
+    private static final AtomicInteger ENGINE_COUNT = new AtomicInteger(0);
+
+    /**
+     * Registers a new VllmEngine instance. Starts the keepalive thread
+     * if this is the first live engine.
+     *
+     * <p>Called from the {@code VllmEngine} constructor.
+     */
+    public static void registerEngine() {
+        if (ENGINE_COUNT.incrementAndGet() == 1) {
+            startKeepalive();
+        }
+    }
+
+    /**
+     * Unregisters a VllmEngine instance. Stops the keepalive thread
+     * when the last engine closes.
+     *
+     * <p>Called from {@code VllmEngine.close()} <em>before</em> any
+     * Python object teardown — this ensures the keepalive thread is
+     * no longer touching CPython when {@code shutdownEngineCore()} and
+     * {@code decref()} run, which may tear down vLLM's background
+     * threads and invalidate Python thread states.
+     */
+    public static void unregisterEngine() {
+        if (ENGINE_COUNT.decrementAndGet() <= 0) {
+            ENGINE_COUNT.set(0); // clamp to 0
+            stopKeepalive();
+        }
+    }
 
     /**
      * Returns {@code true} if CPython has been initialized via
@@ -128,6 +179,9 @@ public final class PythonRuntime implements AutoCloseable {
         // already released it; PyEval_SaveThread will save the current thread state).
         if (!alreadyInitialized) {
             savedThreadState = CPython.PyEval_SaveThread();
+            // Keepalive is NOT started here — it is started by registerEngine()
+            // when the first VllmEngine is created, and stopped by unregisterEngine()
+            // when the last VllmEngine closes.
         }
     }
 
@@ -154,6 +208,83 @@ public final class PythonRuntime implements AutoCloseable {
         //      effectively free.
         //
         // See: https://docs.python.org/3/c-api/init.html#c.Py_FinalizeEx
+    }
+
+    // ── Keepalive thread ───────────────────────────────────────────────────
+
+    /**
+     * Starts the keepalive daemon thread if not already running.
+     *
+     * <p>The thread periodically acquires the GIL and calls {@code id(None)} —
+     * a trivial CPython operation that keeps the Python thread state machinery
+     * and CUDA context warm. Without this, long idle periods cause the JVM to
+     * reap the thread that called {@code Py_InitializeEx}, leading to segfaults
+     * when {@code PyGILState_Ensure} is later invoked from a different thread.
+     *
+     * <p>Restartable: if the keepalive was previously stopped (last engine
+     * closed), calling this again will start a fresh keepalive thread.
+     */
+    private static synchronized void startKeepalive() {
+        if (keepaliveThread != null && keepaliveThread.isAlive()) return;
+        KEEPALIVE_STOPPED.set(false);
+        keepaliveThread = new Thread(PythonRuntime::keepaliveLoop, "vllm4j-keepalive");
+        keepaliveThread.setDaemon(true);
+        keepaliveThread.start();
+    }
+
+    /**
+     * Stops the keepalive daemon thread and waits for it to exit.
+     *
+     * <p>Called when the last {@code VllmEngine} closes. The thread must be
+     * fully stopped <em>before</em> the engine tears down Python objects,
+     * because vLLM's shutdown may invalidate Python thread states that the
+     * keepalive thread uses via {@code PyGILState_Ensure}.
+     */
+    private static synchronized void stopKeepalive() {
+        KEEPALIVE_STOPPED.set(true);
+        Thread t = keepaliveThread;
+        if (t != null) {
+            LockSupport.unpark(t); // wake it if parked
+            try {
+                t.join(5_000); // wait up to 5 seconds
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            keepaliveThread = null;
+        }
+    }
+
+    /**
+     * Keepalive loop: parks for {@link #KEEPALIVE_INTERVAL_NS}, then pings
+     * CPython. Runs until {@link #KEEPALIVE_STOPPED} is set.
+     */
+    private static void keepaliveLoop() {
+        while (!KEEPALIVE_STOPPED.get()) {
+            LockSupport.parkNanos(KEEPALIVE_INTERVAL_NS);
+            if (KEEPALIVE_STOPPED.get()) break;
+            pingInterpreter();
+        }
+    }
+
+    /**
+     * Acquires the GIL and calls {@code id(None)} — a trivial, side-effect-free
+     * CPython operation. This keeps the interpreter thread state valid and
+     * prevents the CUDA context from going stale.
+     *
+     * <p>Best-effort — silently ignores any errors.
+     */
+    private static void pingInterpreter() {
+        try (var gil = GIL.acquire(); Arena tmp = Arena.ofConfined()) {
+            // Import builtins and call id(None) — trivial, side-effect-free.
+            // This touches the interpreter state and validates the thread state.
+            MemorySegment builtins = CPython.PyImport_ImportModule(tmp.allocateFrom("builtins"));
+            if (!PythonTypes.isNull(builtins)) {
+                PythonTypes.decref(builtins);
+            }
+            CPython.PyErr_Clear();
+        } catch (Exception e) {
+            // Ignore — best-effort keepalive
+        }
     }
 
     // ── sys.path / sys.executable fixes ────────────────────────────────────
