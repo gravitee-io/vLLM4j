@@ -1,5 +1,21 @@
 #!/usr/bin/env bash
 #
+# Copyright © 2015 The Gravitee team (http://gravitee.io)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+#
 # Resolves the Python.h include path, libpython path, and PYTHONHOME, then
 # runs jextract to generate Java FFM bindings for CPython.
 #
@@ -23,15 +39,17 @@ PROJECT_DIR="${PROJECT_BASEDIR:-.}"
 PYTHON_VERSION="3.12"
 JEXTRACT_BIN=""
 OUTPUT_DIR=""
-CPYTHON_PACKAGE="org.vllm.python"
+CPYTHON_PACKAGE="io.gravitee.vllm"
 CPYTHON_CLASS="CPython"
 LIBPYTHON_NAME="python3.12"
+JEXTRACT_OS=""
+JEXTRACT_PLATFORM=""
 
 print_usage() {
-  echo "Usage: $0 -d <project_dir> -v <python_version> -j <jextract_bin> -o <output_dir> [-p <package>] [-c <class>] [-l <libpython>]"
+  echo "Usage: $0 -d <project_dir> -v <python_version> -j <jextract_bin> -o <output_dir> [-p <package>] [-c <class>] [-l <libpython>] [-O <os>] [-P <platform>]"
 }
 
-while getopts ":d:v:j:o:p:c:l:h" opt; do
+while getopts ":d:v:j:o:p:c:l:O:P:h" opt; do
   case ${opt} in
     d) PROJECT_DIR=$OPTARG ;;
     v) PYTHON_VERSION=$OPTARG ;;
@@ -40,6 +58,8 @@ while getopts ":d:v:j:o:p:c:l:h" opt; do
     p) CPYTHON_PACKAGE=$OPTARG ;;
     c) CPYTHON_CLASS=$OPTARG ;;
     l) LIBPYTHON_NAME=$OPTARG ;;
+    O) JEXTRACT_OS=$OPTARG ;;
+    P) JEXTRACT_PLATFORM=$OPTARG ;;
     h) print_usage; exit 0 ;;
     \?) echo "Invalid option: -$OPTARG" >&2; print_usage; exit 1 ;;
     :)  echo "Option -$OPTARG requires an argument." >&2; print_usage; exit 1 ;;
@@ -50,6 +70,13 @@ if [[ -z "$JEXTRACT_BIN" || -z "$OUTPUT_DIR" ]]; then
   echo "Missing required arguments (-j and -o)." >&2
   print_usage
   exit 1
+fi
+
+# Build the platform-specific target package for jextract.
+# e.g. io.gravitee.vllm.macosx.aarch64 or io.gravitee.vllm.linux.x86_64
+if [[ -n "$JEXTRACT_OS" && -n "$JEXTRACT_PLATFORM" ]]; then
+  CPYTHON_PACKAGE="${CPYTHON_PACKAGE}.${JEXTRACT_OS}.${JEXTRACT_PLATFORM}"
+  echo "Platform-specific package: ${CPYTHON_PACKAGE}"
 fi
 
 VENV_DIR="${PROJECT_DIR}/.venv"

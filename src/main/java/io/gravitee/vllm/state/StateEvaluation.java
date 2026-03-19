@@ -1,3 +1,18 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.state;
 
 import java.util.EnumMap;
@@ -29,98 +44,101 @@ import java.util.Map;
  */
 public final class StateEvaluation {
 
-    private Map<GenerationState, TagBounds> tagsByState;
-    private Map<GenerationState, Boolean> occurred;
-    private final StringBuilder buffer = new StringBuilder();
+  private Map<GenerationState, TagBounds> tagsByState;
+  private Map<GenerationState, Boolean> occurred;
+  private final StringBuilder buffer = new StringBuilder();
 
-    /**
-     * Initializes the FSM with the given tag configurations.
-     * Must be called before {@link #evaluate}.
-     */
-    public void initialize(List<TagBounds> tags) {
-        tagsByState = new EnumMap<>(GenerationState.class);
-        occurred = new EnumMap<>(GenerationState.class);
-        for (TagBounds tb : tags) {
-            tagsByState.put(tb.state(), tb);
-            occurred.put(tb.state(), false);
-        }
+  /**
+   * Initializes the FSM with the given tag configurations.
+   * Must be called before {@link #evaluate}.
+   */
+  public void initialize(List<TagBounds> tags) {
+    tagsByState = new EnumMap<>(GenerationState.class);
+    occurred = new EnumMap<>(GenerationState.class);
+    for (TagBounds tb : tags) {
+      tagsByState.put(tb.state(), tb);
+      occurred.put(tb.state(), false);
+    }
+    buffer.setLength(0);
+  }
+
+  /** Whether this FSM has been initialized with at least one tag config. */
+  public boolean isInitialized() {
+    return tagsByState != null && !tagsByState.isEmpty();
+  }
+
+  /**
+   * Feeds a text delta into the FSM and returns the new generation state.
+   *
+   * @param currentState the current state before this delta
+   * @param delta        the new text fragment
+   * @return the state after evaluating this delta
+   */
+  public GenerationState evaluate(GenerationState currentState, String delta) {
+    if (!isInitialized() || delta == null || delta.isEmpty()) {
+      return currentState != null ? currentState : GenerationState.ANSWER;
+    }
+
+    buffer.append(delta);
+
+    return switch (currentState) {
+      case ANSWER -> detectOpenTag();
+      case REASONING, TOOLS -> detectCloseTag(currentState);
+      case null -> GenerationState.ANSWER;
+    };
+  }
+
+  /**
+   * Resets the internal text buffer. Call this when starting a new
+   * generation turn.
+   */
+  public void reset() {
+    buffer.setLength(0);
+    if (occurred != null) {
+      occurred.replaceAll((k, v) -> false);
+    }
+  }
+
+  // ── Internal ────────────────────────────────────────────────────────
+
+  private GenerationState detectOpenTag() {
+    String text = buffer.toString();
+    for (var entry : tagsByState.entrySet()) {
+      GenerationState state = entry.getKey();
+      TagBounds bounds = entry.getValue();
+
+      // Skip states that already occurred (except TOOLS which can repeat)
+      if (
+        state != GenerationState.TOOLS &&
+        Boolean.TRUE.equals(occurred.get(state))
+      ) {
+        continue;
+      }
+
+      int idx = text.lastIndexOf(bounds.openTag());
+      if (idx >= 0) {
+        // Transition — clear buffer up to after the open tag
         buffer.setLength(0);
+        return state;
+      }
     }
+    return GenerationState.ANSWER;
+  }
 
-    /** Whether this FSM has been initialized with at least one tag config. */
-    public boolean isInitialized() {
-        return tagsByState != null && !tagsByState.isEmpty();
+  private GenerationState detectCloseTag(GenerationState currentState) {
+    TagBounds bounds = tagsByState.get(currentState);
+    if (bounds == null) return GenerationState.ANSWER;
+
+    String text = buffer.toString();
+    int idx = text.lastIndexOf(bounds.closeTag());
+    if (idx >= 0) {
+      // Mark occurred (REASONING once, TOOLS can repeat)
+      if (currentState != GenerationState.TOOLS) {
+        occurred.put(currentState, true);
+      }
+      buffer.setLength(0);
+      return GenerationState.ANSWER;
     }
-
-    /**
-     * Feeds a text delta into the FSM and returns the new generation state.
-     *
-     * @param currentState the current state before this delta
-     * @param delta        the new text fragment
-     * @return the state after evaluating this delta
-     */
-    public GenerationState evaluate(GenerationState currentState, String delta) {
-        if (!isInitialized() || delta == null || delta.isEmpty()) {
-            return currentState != null ? currentState : GenerationState.ANSWER;
-        }
-
-        buffer.append(delta);
-
-        return switch (currentState) {
-            case ANSWER -> detectOpenTag();
-            case REASONING, TOOLS -> detectCloseTag(currentState);
-            case null -> GenerationState.ANSWER;
-        };
-    }
-
-    /**
-     * Resets the internal text buffer. Call this when starting a new
-     * generation turn.
-     */
-    public void reset() {
-        buffer.setLength(0);
-        if (occurred != null) {
-            occurred.replaceAll((k, v) -> false);
-        }
-    }
-
-    // ── Internal ────────────────────────────────────────────────────────
-
-    private GenerationState detectOpenTag() {
-        String text = buffer.toString();
-        for (var entry : tagsByState.entrySet()) {
-            GenerationState state = entry.getKey();
-            TagBounds bounds = entry.getValue();
-
-            // Skip states that already occurred (except TOOLS which can repeat)
-            if (state != GenerationState.TOOLS && Boolean.TRUE.equals(occurred.get(state))) {
-                continue;
-            }
-
-            int idx = text.lastIndexOf(bounds.openTag());
-            if (idx >= 0) {
-                // Transition — clear buffer up to after the open tag
-                buffer.setLength(0);
-                return state;
-            }
-        }
-        return GenerationState.ANSWER;
-    }
-
-    private GenerationState detectCloseTag(GenerationState currentState) {
-        TagBounds bounds = tagsByState.get(currentState);
-        if (bounds == null) return GenerationState.ANSWER;
-
-        String text = buffer.toString();
-        int idx = text.lastIndexOf(bounds.closeTag());
-        if (idx >= 0) {
-            // Mark occurred (REASONING once, TOOLS can repeat)
-            if (currentState != GenerationState.TOOLS) {
-                occurred.put(currentState, true);
-            }
-            buffer.setLength(0);
-            return GenerationState.ANSWER;
-        }
-        return currentState;
-    }
+    return currentState;
+  }
 }

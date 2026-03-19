@@ -1,3 +1,18 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.iterator;
 
 import io.gravitee.vllm.engine.VllmEngine;
@@ -21,43 +36,43 @@ import io.gravitee.vllm.template.ChatTemplate;
  */
 final class SharedVlmEngine {
 
-    private static volatile VllmEngine engine;
-    private static volatile ChatTemplate chatTemplate;
+  private static volatile VllmEngine engine;
+  private static volatile ChatTemplate chatTemplate;
 
-    private SharedVlmEngine() {}
+  private SharedVlmEngine() {}
 
-    static VllmEngine engine() {
+  static VllmEngine engine() {
+    if (engine == null) {
+      synchronized (SharedVlmEngine.class) {
         if (engine == null) {
-            synchronized (SharedVlmEngine.class) {
-                if (engine == null) {
-                    engine = VllmEngine.builder()
-                            .model("HuggingFaceTB/SmolVLM-256M-Instruct")
-                            .dtype("auto")
-                            .enforceEager(true)
-                            .maxModelLen(2048)
-                            .maxNumSeqs(2)
-                            .gpuMemoryUtilization(0.50)
-                            .build();
-                }
-            }
+          engine = VllmEngine.builder()
+            .model("HuggingFaceTB/SmolVLM-256M-Instruct")
+            .dtype("auto")
+            .enforceEager(true)
+            .maxModelLen(2048)
+            .maxNumSeqs(2)
+            .gpuMemoryUtilization(0.50)
+            .build();
         }
-        return engine;
+      }
     }
+    return engine;
+  }
 
-    static ChatTemplate chatTemplate() {
+  static ChatTemplate chatTemplate() {
+    if (chatTemplate == null) {
+      synchronized (SharedVlmEngine.class) {
         if (chatTemplate == null) {
-            synchronized (SharedVlmEngine.class) {
-                if (chatTemplate == null) {
-                    chatTemplate = new ChatTemplate(engine());
-                }
-            }
+          chatTemplate = new ChatTemplate(engine());
         }
-        return chatTemplate;
+      }
     }
+    return chatTemplate;
+  }
 
-    static void close() {
-        if (engine != null) {
-            engine.close();
-        }
+  static void close() {
+    if (engine != null) {
+      engine.close();
     }
+  }
 }

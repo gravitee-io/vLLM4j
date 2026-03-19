@@ -9,7 +9,7 @@ Embeds CPython in-process, drives vLLM's synchronous `LLMEngine` directly, and e
 ```
 ┌──────────────┐     FFM (Panama)     ┌──────────────┐     Python C API     ┌──────────┐
 │   Java 25    │ ──────────────────── │  libpython   │ ──────────────────── │   vLLM   │
-│  (your app)  │    jextract bindings │   3.12       │   LLMEngine.step()  │  engine  │
+│  (your app)  │    jextract bindings │   3.12       │   LLMEngine.step()   │  engine  │
 └──────────────┘                      └──────────────┘                      └──────────┘
 ```
 

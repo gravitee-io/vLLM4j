@@ -1,3 +1,18 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.engine;
 
 /**
@@ -8,44 +23,43 @@ package io.gravitee.vllm.engine;
  * via the {@link io.gravitee.vllm.state.ConversationState} FSM.
  */
 public enum FinishReason {
+  /** End-of-sequence or stop token/string matched. */
+  STOP("stop"),
 
-    /** End-of-sequence or stop token/string matched. */
-    STOP("stop"),
+  /** Maximum token limit reached. */
+  LENGTH("length"),
 
-    /** Maximum token limit reached. */
-    LENGTH("length"),
+  /** Request was aborted. */
+  ABORT("abort"),
 
-    /** Request was aborted. */
-    ABORT("abort"),
+  /** Model produced a tool call (detected by tag-boundary FSM). */
+  TOOL_CALL("tool_calls");
 
-    /** Model produced a tool call (detected by tag-boundary FSM). */
-    TOOL_CALL("tool_calls");
+  private final String label;
 
-    private final String label;
+  FinishReason(String label) {
+    this.label = label;
+  }
 
-    FinishReason(String label) {
-        this.label = label;
-    }
+  /** Returns the OpenAI-compatible label (e.g. {@code "stop"}, {@code "length"}). */
+  public String label() {
+    return label;
+  }
 
-    /** Returns the OpenAI-compatible label (e.g. {@code "stop"}, {@code "length"}). */
-    public String label() {
-        return label;
-    }
-
-    /**
-     * Parses vLLM's Python-side finish_reason string.
-     *
-     * @param value the Python string, or {@code null}
-     * @return the matching enum value, or {@code null} if input is null/empty
-     */
-    public static FinishReason fromVllmString(String value) {
-        if (value == null || value.isEmpty()) return null;
-        return switch (value) {
-            case "stop"       -> STOP;
-            case "length"     -> LENGTH;
-            case "abort"      -> ABORT;
-            case "tool_calls" -> TOOL_CALL;
-            default           -> STOP; // unknown reasons treated as stop
-        };
-    }
+  /**
+   * Parses vLLM's Python-side finish_reason string.
+   *
+   * @param value the Python string, or {@code null}
+   * @return the matching enum value, or {@code null} if input is null/empty
+   */
+  public static FinishReason fromVllmString(String value) {
+    if (value == null || value.isEmpty()) return null;
+    return switch (value) {
+      case "stop" -> STOP;
+      case "length" -> LENGTH;
+      case "abort" -> ABORT;
+      case "tool_calls" -> TOOL_CALL;
+      default -> STOP; // unknown reasons treated as stop
+    };
+  }
 }

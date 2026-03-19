@@ -1,3 +1,18 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.template;
 
 import java.util.List;
@@ -28,96 +43,106 @@ import java.util.Map;
  * @param name         the function name for tool result messages, or {@code null}
  */
 public record ChatMessage(
-        String role,
-        String content,
-        List<Map<String, Object>> contentParts,
-        List<ToolCall> toolCalls,
-        String toolCallId,
-        String name) {
+  String role,
+  String content,
+  List<Map<String, Object>> contentParts,
+  List<ToolCall> toolCalls,
+  String toolCallId,
+  String name
+) {
+  /**
+   * Simple two-field constructor (backward-compatible).
+   */
+  public ChatMessage(String role, String content) {
+    this(role, content, null, null, null, null);
+  }
 
-    /**
-     * Simple two-field constructor (backward-compatible).
-     */
-    public ChatMessage(String role, String content) {
-        this(role, content, null, null, null, null);
-    }
+  // ── Convenience factories ───────────────────────────────────────────
 
-    // ── Convenience factories ───────────────────────────────────────────
+  /** Creates a user message. */
+  public static ChatMessage user(String content) {
+    return new ChatMessage("user", content);
+  }
 
-    /** Creates a user message. */
-    public static ChatMessage user(String content) {
-        return new ChatMessage("user", content);
-    }
+  /** Creates a system message. */
+  public static ChatMessage system(String content) {
+    return new ChatMessage("system", content);
+  }
 
-    /** Creates a system message. */
-    public static ChatMessage system(String content) {
-        return new ChatMessage("system", content);
-    }
+  /** Creates an assistant message (plain text, no tool calls). */
+  public static ChatMessage assistant(String content) {
+    return new ChatMessage("assistant", content);
+  }
 
-    /** Creates an assistant message (plain text, no tool calls). */
-    public static ChatMessage assistant(String content) {
-        return new ChatMessage("assistant", content);
-    }
+  /**
+   * Creates a user message with multimodal content parts.
+   *
+   * <p>The content parts follow the OpenAI format:
+   * <pre>{@code
+   * [{"type": "text", "text": "Describe this image"},
+   *  {"type": "image"}]
+   * }</pre>
+   *
+   * @param textContent  the text portion (also stored in {@code content} for fallback)
+   * @param contentParts the full multimodal content parts list
+   */
+  public static ChatMessage userWithParts(
+    String textContent,
+    List<Map<String, Object>> contentParts
+  ) {
+    return new ChatMessage("user", textContent, contentParts, null, null, null);
+  }
 
-    /**
-     * Creates a user message with multimodal content parts.
-     *
-     * <p>The content parts follow the OpenAI format:
-     * <pre>{@code
-     * [{"type": "text", "text": "Describe this image"},
-     *  {"type": "image"}]
-     * }</pre>
-     *
-     * @param textContent  the text portion (also stored in {@code content} for fallback)
-     * @param contentParts the full multimodal content parts list
-     */
-    public static ChatMessage userWithParts(String textContent, List<Map<String, Object>> contentParts) {
-        return new ChatMessage("user", textContent, contentParts, null, null, null);
-    }
+  /**
+   * Creates an assistant message that contains tool calls.
+   *
+   * <p>The content may be {@code null} (model emitted no text before calling tools)
+   * or may contain reasoning/text the model produced alongside the calls.
+   *
+   * @param content   optional text content (may be null)
+   * @param toolCalls the tool calls the assistant wants to make
+   */
+  public static ChatMessage assistantWithToolCalls(
+    String content,
+    List<ToolCall> toolCalls
+  ) {
+    return new ChatMessage("assistant", content, null, toolCalls, null, null);
+  }
 
-    /**
-     * Creates an assistant message that contains tool calls.
-     *
-     * <p>The content may be {@code null} (model emitted no text before calling tools)
-     * or may contain reasoning/text the model produced alongside the calls.
-     *
-     * @param content   optional text content (may be null)
-     * @param toolCalls the tool calls the assistant wants to make
-     */
-    public static ChatMessage assistantWithToolCalls(String content, List<ToolCall> toolCalls) {
-        return new ChatMessage("assistant", content, null, toolCalls, null, null);
-    }
+  /**
+   * Creates a tool result message that answers a specific tool call.
+   *
+   * @param content    the tool's output (e.g. {@code "22°C, sunny"})
+   * @param toolCallId the ID of the tool call this responds to
+   * @param name       the function name
+   */
+  public static ChatMessage toolResult(
+    String content,
+    String toolCallId,
+    String name
+  ) {
+    return new ChatMessage("tool", content, null, null, toolCallId, name);
+  }
 
-    /**
-     * Creates a tool result message that answers a specific tool call.
-     *
-     * @param content    the tool's output (e.g. {@code "22°C, sunny"})
-     * @param toolCallId the ID of the tool call this responds to
-     * @param name       the function name
-     */
-    public static ChatMessage toolResult(String content, String toolCallId, String name) {
-        return new ChatMessage("tool", content, null, null, toolCallId, name);
-    }
+  /** Creates a plain tool message (backward-compatible, no tool_call_id). */
+  public static ChatMessage tool(String content) {
+    return new ChatMessage("tool", content);
+  }
 
-    /** Creates a plain tool message (backward-compatible, no tool_call_id). */
-    public static ChatMessage tool(String content) {
-        return new ChatMessage("tool", content);
-    }
+  // ── Queries ─────────────────────────────────────────────────────────
 
-    // ── Queries ─────────────────────────────────────────────────────────
+  /** Returns {@code true} if this message contains tool calls. */
+  public boolean hasToolCalls() {
+    return toolCalls != null && !toolCalls.isEmpty();
+  }
 
-    /** Returns {@code true} if this message contains tool calls. */
-    public boolean hasToolCalls() {
-        return toolCalls != null && !toolCalls.isEmpty();
-    }
+  /** Returns {@code true} if this is a tool result message with a call ID. */
+  public boolean isToolResult() {
+    return toolCallId != null;
+  }
 
-    /** Returns {@code true} if this is a tool result message with a call ID. */
-    public boolean isToolResult() {
-        return toolCallId != null;
-    }
-
-    /** Returns {@code true} if this message has multimodal content parts. */
-    public boolean hasContentParts() {
-        return contentParts != null && !contentParts.isEmpty();
-    }
+  /** Returns {@code true} if this message has multimodal content parts. */
+  public boolean hasContentParts() {
+    return contentParts != null && !contentParts.isEmpty();
+  }
 }

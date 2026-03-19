@@ -1,3 +1,18 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.engine;
 
 /**
@@ -34,63 +49,75 @@ package io.gravitee.vllm.engine;
  * @param loraRequest    optional LoRA adapter to apply, or {@code null} for base model
  */
 public record VllmRequest(
-        String requestId,
-        String prompt,
-        SamplingParams samplingParams,
-        MultiModalData multiModalData,
-        int priority,
-        LoraRequest loraRequest) {
-
-    /**
-     * Compact constructor — validates required fields.
-     */
-    public VllmRequest {
-        if (requestId == null || requestId.isBlank()) {
-            throw new IllegalArgumentException("requestId must not be null or blank");
-        }
-        if (prompt == null) {
-            throw new IllegalArgumentException("prompt must not be null");
-        }
-        if (samplingParams == null) {
-            throw new IllegalArgumentException("samplingParams must not be null");
-        }
+  String requestId,
+  String prompt,
+  SamplingParams samplingParams,
+  MultiModalData multiModalData,
+  int priority,
+  LoraRequest loraRequest
+) {
+  /**
+   * Compact constructor — validates required fields.
+   */
+  public VllmRequest {
+    if (requestId == null || requestId.isBlank()) {
+      throw new IllegalArgumentException("requestId must not be null or blank");
     }
-
-    /**
-     * Text-only constructor (backward-compatible, default priority 0, no LoRA).
-     */
-    public VllmRequest(String requestId, String prompt, SamplingParams samplingParams) {
-        this(requestId, prompt, samplingParams, null, 0, null);
+    if (prompt == null) {
+      throw new IllegalArgumentException("prompt must not be null");
     }
-
-    /**
-     * Constructor with multimodal data (default priority 0, no LoRA).
-     */
-    public VllmRequest(String requestId, String prompt, SamplingParams samplingParams,
-                       MultiModalData multiModalData) {
-        this(requestId, prompt, samplingParams, multiModalData, 0, null);
+    if (samplingParams == null) {
+      throw new IllegalArgumentException("samplingParams must not be null");
     }
+  }
 
-    /**
-     * Constructor with LoRA adapter (no multimodal, default priority 0).
-     */
-    public VllmRequest(String requestId, String prompt, SamplingParams samplingParams,
-                       LoraRequest loraRequest) {
-        this(requestId, prompt, samplingParams, null, 0, loraRequest);
-    }
+  /**
+   * Text-only constructor (backward-compatible, default priority 0, no LoRA).
+   */
+  public VllmRequest(
+    String requestId,
+    String prompt,
+    SamplingParams samplingParams
+  ) {
+    this(requestId, prompt, samplingParams, null, 0, null);
+  }
 
-    /** Returns {@code true} if this request includes multimodal data. */
-    public boolean isMultiModal() {
-        return multiModalData != null && multiModalData.hasData();
-    }
+  /**
+   * Constructor with multimodal data (default priority 0, no LoRA).
+   */
+  public VllmRequest(
+    String requestId,
+    String prompt,
+    SamplingParams samplingParams,
+    MultiModalData multiModalData
+  ) {
+    this(requestId, prompt, samplingParams, multiModalData, 0, null);
+  }
 
-    /** Returns {@code true} if this request has a non-default priority. */
-    public boolean hasPriority() {
-        return priority != 0;
-    }
+  /**
+   * Constructor with LoRA adapter (no multimodal, default priority 0).
+   */
+  public VllmRequest(
+    String requestId,
+    String prompt,
+    SamplingParams samplingParams,
+    LoraRequest loraRequest
+  ) {
+    this(requestId, prompt, samplingParams, null, 0, loraRequest);
+  }
 
-    /** Returns {@code true} if this request uses a LoRA adapter. */
-    public boolean hasLora() {
-        return loraRequest != null;
-    }
+  /** Returns {@code true} if this request includes multimodal data. */
+  public boolean isMultiModal() {
+    return multiModalData != null && multiModalData.hasData();
+  }
+
+  /** Returns {@code true} if this request has a non-default priority. */
+  public boolean hasPriority() {
+    return priority != 0;
+  }
+
+  /** Returns {@code true} if this request uses a LoRA adapter. */
+  public boolean hasLora() {
+    return loraRequest != null;
+  }
 }
