@@ -1,6 +1,21 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.runtime;
 
-import org.vllm.python.CPython;
+import io.gravitee.vllm.binding.CPythonBinding;
 
 /**
  * RAII wrapper for CPython's Global Interpreter Lock (GIL).
@@ -40,39 +55,39 @@ import org.vllm.python.CPython;
  */
 public final class GIL implements AutoCloseable {
 
-    private final int gilState;
-    private boolean released = false;
+  private final int gilState;
+  private boolean released = false;
 
-    private GIL(int gilState) {
-        this.gilState = gilState;
-    }
+  private GIL(int gilState) {
+    this.gilState = gilState;
+  }
 
-    /**
-     * Acquires the GIL for the calling thread.
-     *
-     * <p>If the calling thread already holds the GIL, this is a no-op
-     * (the internal reference count is incremented). Otherwise, the
-     * thread blocks until the GIL becomes available.
-     *
-     * @return a {@code GIL} instance that must be {@link #close() closed}
-     *         to release the GIL
-     */
-    public static GIL acquire() {
-        int state = CPython.PyGILState_Ensure();
-        return new GIL(state);
-    }
+  /**
+   * Acquires the GIL for the calling thread.
+   *
+   * <p>If the calling thread already holds the GIL, this is a no-op
+   * (the internal reference count is incremented). Otherwise, the
+   * thread blocks until the GIL becomes available.
+   *
+   * @return a {@code GIL} instance that must be {@link #close() closed}
+   *         to release the GIL
+   */
+  public static GIL acquire() {
+    int state = CPythonBinding.PyGILState_Ensure();
+    return new GIL(state);
+  }
 
-    /**
-     * Releases the GIL. Must be called exactly once per {@link #acquire()}.
-     *
-     * <p>After this call, the current thread no longer holds the GIL and
-     * must not call CPython API functions until it re-acquires it.
-     */
-    @Override
-    public void close() {
-        if (!released) {
-            released = true;
-            CPython.PyGILState_Release(gilState);
-        }
+  /**
+   * Releases the GIL. Must be called exactly once per {@link #acquire()}.
+   *
+   * <p>After this call, the current thread no longer holds the GIL and
+   * must not call CPython API functions until it re-acquires it.
+   */
+  @Override
+  public void close() {
+    if (!released) {
+      released = true;
+      CPythonBinding.PyGILState_Release(gilState);
     }
+  }
 }

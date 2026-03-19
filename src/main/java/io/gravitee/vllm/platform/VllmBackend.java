@@ -1,3 +1,18 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.platform;
 
 import java.io.IOException;
@@ -26,100 +41,103 @@ import java.util.Map;
  * </ol>
  */
 public enum VllmBackend {
+  METAL(
+    Map.of(
+      "VLLM_ENABLE_V1_MULTIPROCESSING",
+      "0",
+      "VLLM_METAL_USE_MLX",
+      "1",
+      "VLLM_MLX_DEVICE",
+      "gpu",
+      "GLOO_SOCKET_IFNAME",
+      "lo0"
+    )
+  ),
 
-    METAL(Map.of(
-            "VLLM_ENABLE_V1_MULTIPROCESSING", "0",
-            "VLLM_METAL_USE_MLX", "1",
-            "VLLM_MLX_DEVICE", "gpu",
-            "GLOO_SOCKET_IFNAME", "lo0"
-    )),
+  CUDA(Map.of("VLLM_ENABLE_V1_MULTIPROCESSING", "0")),
 
-    CUDA(Map.of(
-            "VLLM_ENABLE_V1_MULTIPROCESSING", "0"
-    )),
+  CPU(
+    Map.of("VLLM_ENABLE_V1_MULTIPROCESSING", "0", "VLLM_TARGET_DEVICE", "cpu")
+  );
 
-    CPU(Map.of(
-            "VLLM_ENABLE_V1_MULTIPROCESSING", "0",
-            "VLLM_TARGET_DEVICE", "cpu"
-    ));
+  private final Map<String, String> envVars;
 
-    private final Map<String, String> envVars;
+  VllmBackend(Map<String, String> envVars) {
+    this.envVars = envVars;
+  }
 
-    VllmBackend(Map<String, String> envVars) {
-        this.envVars = envVars;
+  /**
+   * Returns the environment variables that must be set before
+   * {@code Py_InitializeEx} for this backend.
+   */
+  public Map<String, String> envVars() {
+    return envVars;
+  }
+
+  /**
+   * Detects the appropriate backend for the current platform.
+   *
+   * @see VllmBackend class-level javadoc for detection order
+   */
+  public static VllmBackend detect() {
+    // 1. Explicit env var
+    String envBackend = System.getenv("VLLM4J_BACKEND");
+    if (envBackend != null && !envBackend.isBlank()) {
+      return fromString(envBackend);
     }
 
-    /**
-     * Returns the environment variables that must be set before
-     * {@code Py_InitializeEx} for this backend.
-     */
-    public Map<String, String> envVars() {
-        return envVars;
+    // 2. System property
+    String propBackend = System.getProperty("vllm4j.backend");
+    if (propBackend != null && !propBackend.isBlank()) {
+      return fromString(propBackend);
     }
 
-    /**
-     * Detects the appropriate backend for the current platform.
-     *
-     * @see VllmBackend class-level javadoc for detection order
-     */
-    public static VllmBackend detect() {
-        // 1. Explicit env var
-        String envBackend = System.getenv("VLLM4J_BACKEND");
-        if (envBackend != null && !envBackend.isBlank()) {
-            return fromString(envBackend);
-        }
+    // 3. Auto-detect from platform
+    OperatingSystem os = OperatingSystem.fromSystem();
+    Architecture arch = Architecture.fromSystem();
 
-        // 2. System property
-        String propBackend = System.getProperty("vllm4j.backend");
-        if (propBackend != null && !propBackend.isBlank()) {
-            return fromString(propBackend);
-        }
-
-        // 3. Auto-detect from platform
-        OperatingSystem os = OperatingSystem.fromSystem();
-        Architecture arch = Architecture.fromSystem();
-
-        if (os == OperatingSystem.MAC_OS_X && arch == Architecture.AARCH64) {
-            return METAL;
-        }
-
-        if (os == OperatingSystem.LINUX && hasNvidiaGpu()) {
-            return CUDA;
-        }
-
-        return CPU;
+    if (os == OperatingSystem.MAC_OS_X && arch == Architecture.AARCH64) {
+      return METAL;
     }
 
-    private static VllmBackend fromString(String value) {
-        return switch (value.strip().toLowerCase()) {
-            case "metal" -> METAL;
-            case "cuda" -> CUDA;
-            case "cpu" -> CPU;
-            default -> throw new IllegalArgumentException(
-                    "Unknown vLLM backend: '" + value + "'. Supported: metal, cuda, cpu");
-        };
+    if (os == OperatingSystem.LINUX && hasNvidiaGpu()) {
+      return CUDA;
     }
 
-    /**
-     * Probes for an NVIDIA GPU by checking {@code /dev/nvidia0} or running
-     * {@code nvidia-smi}. This is a best-effort check — CUDA availability
-     * ultimately depends on the installed Python packages.
-     */
-    private static boolean hasNvidiaGpu() {
-        // Fast path: check device node
-        if (Files.exists(Path.of("/dev/nvidia0"))) {
-            return true;
-        }
+    return CPU;
+  }
 
-        // Fallback: try nvidia-smi
-        try {
-            Process p = new ProcessBuilder("nvidia-smi")
-                    .redirectErrorStream(true)
-                    .start();
-            int exitCode = p.waitFor();
-            return exitCode == 0;
-        } catch (IOException | InterruptedException _) {
-            return false;
-        }
+  private static VllmBackend fromString(String value) {
+    return switch (value.strip().toLowerCase()) {
+      case "metal" -> METAL;
+      case "cuda" -> CUDA;
+      case "cpu" -> CPU;
+      default -> throw new IllegalArgumentException(
+        "Unknown vLLM backend: '" + value + "'. Supported: metal, cuda, cpu"
+      );
+    };
+  }
+
+  /**
+   * Probes for an NVIDIA GPU by checking {@code /dev/nvidia0} or running
+   * {@code nvidia-smi}. This is a best-effort check — CUDA availability
+   * ultimately depends on the installed Python packages.
+   */
+  private static boolean hasNvidiaGpu() {
+    // Fast path: check device node
+    if (Files.exists(Path.of("/dev/nvidia0"))) {
+      return true;
     }
+
+    // Fallback: try nvidia-smi
+    try {
+      Process p = new ProcessBuilder("nvidia-smi")
+        .redirectErrorStream(true)
+        .start();
+      int exitCode = p.waitFor();
+      return exitCode == 0;
+    } catch (IOException | InterruptedException _) {
+      return false;
+    }
+  }
 }

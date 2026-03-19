@@ -1,8 +1,22 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.iterator;
 
 import io.gravitee.vllm.engine.LogprobEntry;
 import io.gravitee.vllm.state.GenerationState;
-
 import java.util.List;
 import java.util.Map;
 
@@ -24,36 +38,62 @@ import java.util.Map;
  *                     or {@code null} if logprobs were not requested
  */
 public record VllmOutput(
-        String requestId,
-        String text,
-        String delta,
-        boolean finished,
-        String finishReason,
-        GenerationState state,
-        List<Integer> tokenIds,
-        List<Map<Integer, LogprobEntry>> logprobs) {
+  String requestId,
+  String text,
+  String delta,
+  boolean finished,
+  String finishReason,
+  GenerationState state,
+  List<Integer> tokenIds,
+  List<Map<Integer, LogprobEntry>> logprobs
+) {
+  /**
+   * Convenience constructor without delta, state classification, token IDs, or logprobs.
+   */
+  public VllmOutput(
+    String requestId,
+    String text,
+    boolean finished,
+    String finishReason
+  ) {
+    this(requestId, text, "", finished, finishReason, null, List.of(), null);
+  }
 
-    /**
-     * Convenience constructor without delta, state classification, token IDs, or logprobs.
-     */
-    public VllmOutput(String requestId, String text, boolean finished, String finishReason) {
-        this(requestId, text, "", finished, finishReason, null, List.of(), null);
-    }
+  /**
+   * Convenience constructor without token IDs or logprobs (backward-compatible).
+   */
+  public VllmOutput(
+    String requestId,
+    String text,
+    String delta,
+    boolean finished,
+    String finishReason,
+    GenerationState state
+  ) {
+    this(
+      requestId,
+      text,
+      delta,
+      finished,
+      finishReason,
+      state,
+      List.of(),
+      null
+    );
+  }
 
-    /**
-     * Convenience constructor without token IDs or logprobs (backward-compatible).
-     */
-    public VllmOutput(String requestId, String text, String delta,
-                      boolean finished, String finishReason, GenerationState state) {
-        this(requestId, text, delta, finished, finishReason, state, List.of(), null);
-    }
-
-    /**
-     * Convenience constructor without logprobs (backward-compatible).
-     */
-    public VllmOutput(String requestId, String text, String delta,
-                      boolean finished, String finishReason, GenerationState state,
-                      List<Integer> tokenIds) {
-        this(requestId, text, delta, finished, finishReason, state, tokenIds, null);
-    }
+  /**
+   * Convenience constructor without logprobs (backward-compatible).
+   */
+  public VllmOutput(
+    String requestId,
+    String text,
+    String delta,
+    boolean finished,
+    String finishReason,
+    GenerationState state,
+    List<Integer> tokenIds
+  ) {
+    this(requestId, text, delta, finished, finishReason, state, tokenIds, null);
+  }
 }

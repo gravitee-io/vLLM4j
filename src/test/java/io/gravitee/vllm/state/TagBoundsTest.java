@@ -1,60 +1,87 @@
+/*
+ * Copyright © 2015 The Gravitee team (http://gravitee.io)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.gravitee.vllm.state;
-
-import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import org.junit.jupiter.api.Test;
+
 class TagBoundsTest {
 
-    @Test
-    void shouldCreateValidTagBounds() {
-        var bounds = new TagBounds(GenerationState.REASONING, "<think>", "</think>");
+  @Test
+  void shouldCreateValidTagBounds() {
+    var bounds = new TagBounds(
+      GenerationState.REASONING,
+      "<think>",
+      "</think>"
+    );
 
-        assertThat(bounds.state()).isEqualTo(GenerationState.REASONING);
-        assertThat(bounds.openTag()).isEqualTo("<think>");
-        assertThat(bounds.closeTag()).isEqualTo("</think>");
-    }
+    assertThat(bounds.state()).isEqualTo(GenerationState.REASONING);
+    assertThat(bounds.openTag()).isEqualTo("<think>");
+    assertThat(bounds.closeTag()).isEqualTo("</think>");
+  }
 
-    @Test
-    void shouldRejectNullState() {
-        assertThatThrownBy(() -> new TagBounds(null, "<tag>", "</tag>"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("state");
-    }
+  @Test
+  void shouldRejectNullState() {
+    assertThatThrownBy(() -> new TagBounds(null, "<tag>", "</tag>"))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("state");
+  }
 
-    @Test
-    void shouldRejectNullOpenTag() {
-        assertThatThrownBy(() -> new TagBounds(GenerationState.REASONING, null, "</think>"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("openTag");
-    }
+  @Test
+  void shouldRejectNullOpenTag() {
+    assertThatThrownBy(() ->
+      new TagBounds(GenerationState.REASONING, null, "</think>")
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("openTag");
+  }
 
-    @Test
-    void shouldRejectEmptyOpenTag() {
-        assertThatThrownBy(() -> new TagBounds(GenerationState.REASONING, "", "</think>"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("openTag");
-    }
+  @Test
+  void shouldRejectEmptyOpenTag() {
+    assertThatThrownBy(() ->
+      new TagBounds(GenerationState.REASONING, "", "</think>")
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("openTag");
+  }
 
-    @Test
-    void shouldRejectNullCloseTag() {
-        assertThatThrownBy(() -> new TagBounds(GenerationState.REASONING, "<think>", null))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("closeTag");
-    }
+  @Test
+  void shouldRejectNullCloseTag() {
+    assertThatThrownBy(() ->
+      new TagBounds(GenerationState.REASONING, "<think>", null)
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("closeTag");
+  }
 
-    @Test
-    void shouldRejectEmptyCloseTag() {
-        assertThatThrownBy(() -> new TagBounds(GenerationState.REASONING, "<think>", ""))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("closeTag");
-    }
+  @Test
+  void shouldRejectEmptyCloseTag() {
+    assertThatThrownBy(() ->
+      new TagBounds(GenerationState.REASONING, "<think>", "")
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("closeTag");
+  }
 
-    @Test
-    void equality_shouldWork() {
-        var a = new TagBounds(GenerationState.TOOLS, "<tool_call>", "</tool_call>");
-        var b = new TagBounds(GenerationState.TOOLS, "<tool_call>", "</tool_call>");
-        assertThat(a).isEqualTo(b);
-    }
+  @Test
+  void equality_shouldWork() {
+    var a = new TagBounds(GenerationState.TOOLS, "<tool_call>", "</tool_call>");
+    var b = new TagBounds(GenerationState.TOOLS, "<tool_call>", "</tool_call>");
+    assertThat(a).isEqualTo(b);
+  }
 }

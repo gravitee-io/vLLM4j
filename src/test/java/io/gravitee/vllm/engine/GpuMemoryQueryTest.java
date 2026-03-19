@@ -23,49 +23,49 @@ import org.junit.jupiter.api.Test;
 
 class GpuMemoryQueryTest {
 
-    @Test
-    @DisplayName("GpuMemoryInfo record: accessors return correct values")
-    void gpuMemoryInfo_accessors() {
-        GpuMemoryInfo info = new GpuMemoryInfo(8_000_000_000L, 24_000_000_000L);
-        assertThat(info.freeBytes()).isEqualTo(8_000_000_000L);
-        assertThat(info.totalBytes()).isEqualTo(24_000_000_000L);
-    }
+  @Test
+  @DisplayName("GpuMemoryInfo record: accessors return correct values")
+  void gpuMemoryInfo_accessors() {
+    GpuMemoryInfo info = new GpuMemoryInfo(8_000_000_000L, 24_000_000_000L);
+    assertThat(info.freeBytes()).isEqualTo(8_000_000_000L);
+    assertThat(info.totalBytes()).isEqualTo(24_000_000_000L);
+  }
 
-    @Test
-    @DisplayName("GpuMemoryInfo record: equality and hashCode")
-    void gpuMemoryInfo_equality() {
-        GpuMemoryInfo a = new GpuMemoryInfo(1024, 4096);
-        GpuMemoryInfo b = new GpuMemoryInfo(1024, 4096);
-        GpuMemoryInfo c = new GpuMemoryInfo(2048, 4096);
+  @Test
+  @DisplayName("GpuMemoryInfo record: equality and hashCode")
+  void gpuMemoryInfo_equality() {
+    GpuMemoryInfo a = new GpuMemoryInfo(1024, 4096);
+    GpuMemoryInfo b = new GpuMemoryInfo(1024, 4096);
+    GpuMemoryInfo c = new GpuMemoryInfo(2048, 4096);
 
-        assertThat(a).isEqualTo(b);
-        assertThat(a).hasSameHashCodeAs(b);
-        assertThat(a).isNotEqualTo(c);
-    }
+    assertThat(a).isEqualTo(b);
+    assertThat(a).hasSameHashCodeAs(b);
+    assertThat(a).isNotEqualTo(c);
+  }
 
-    @Test
-    @DisplayName("GpuMemoryInfo record: toString includes field values")
-    void gpuMemoryInfo_toString() {
-        GpuMemoryInfo info = new GpuMemoryInfo(100, 200);
-        assertThat(info.toString()).contains("100");
-        assertThat(info.toString()).contains("200");
-    }
+  @Test
+  @DisplayName("GpuMemoryInfo record: toString includes field values")
+  void gpuMemoryInfo_toString() {
+    GpuMemoryInfo info = new GpuMemoryInfo(100, 200);
+    assertThat(info.toString()).contains("100");
+    assertThat(info.toString()).contains("200");
+  }
 
-    @Test
-    @DisplayName("GpuMemoryInfo record: zero values are valid")
-    void gpuMemoryInfo_zero_values() {
-        GpuMemoryInfo info = new GpuMemoryInfo(0, 0);
-        assertThat(info.freeBytes()).isEqualTo(0);
-        assertThat(info.totalBytes()).isEqualTo(0);
-    }
+  @Test
+  @DisplayName("GpuMemoryInfo record: zero values are valid")
+  void gpuMemoryInfo_zero_values() {
+    GpuMemoryInfo info = new GpuMemoryInfo(0, 0);
+    assertThat(info.freeBytes()).isEqualTo(0);
+    assertThat(info.totalBytes()).isEqualTo(0);
+  }
 
-    @Test
-    @DisplayName("GpuMemoryInfo record: large values (>32-bit) work correctly")
-    void gpuMemoryInfo_large_values() {
-        long free = 81_604_378_624L;  // ~76 GiB (A100 80GB typical free)
-        long total = 85_899_345_920L; // ~80 GiB
-        GpuMemoryInfo info = new GpuMemoryInfo(free, total);
-        assertThat(info.freeBytes()).isEqualTo(free);
-        assertThat(info.totalBytes()).isEqualTo(total);
-    }
+  @Test
+  @DisplayName("GpuMemoryInfo record: large values (>32-bit) work correctly")
+  void gpuMemoryInfo_large_values() {
+    long free = 81_604_378_624L; // ~76 GiB (A100 80GB typical free)
+    long total = 85_899_345_920L; // ~80 GiB
+    GpuMemoryInfo info = new GpuMemoryInfo(free, total);
+    assertThat(info.freeBytes()).isEqualTo(free);
+    assertThat(info.totalBytes()).isEqualTo(total);
+  }
 }

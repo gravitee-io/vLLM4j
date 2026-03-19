@@ -1,0 +1,588 @@
+version: 2.1
+
+orbs:
+  gh: circleci/github-cli@2.7.2
+  keeper: gravitee-io/keeper@0.7.0
+
+executors:
+  macos-executor:
+    macos:
+      xcode: 26.3.0
+    resource_class: m4pro.medium
+
+  ubuntu_linux_x86_64:
+    machine:
+      image: ubuntu-2404:current
+    working_directory: /home/circleci
+    resource_class: large
+
+commands:
+  git_config:
+    description: Configure git user from Keeper vault
+    steps:
+      - keeper/env-export:
+          secret-url: keeper://IZd-yvsMopfQEa_0j1SDvg/field/login
+          var-name: GIT_USER_NAME
+      - keeper/env-export:
+          secret-url: keeper://IZd-yvsMopfQEa_0j1SDvg/custom_field/email
+          var-name: GIT_USER_EMAIL
+      - run:
+          name: Git Config
+          command: |
+            cd $HOME_DIR/vLLM4j/
+            git config --global user.name "${GIT_USER_NAME}"
+            git config --global user.email "${GIT_USER_EMAIL}"
+
+  git_auth:
+    description: Configure git remote with GitHub token
+    steps:
+      - keeper/env-export:
+          secret-url: keeper://TIlcGPFq4rN5GvgnZb9hng/field/password
+          var-name: GITHUB_TOKEN
+      - run:
+          name: Git Auth
+          command: |
+            cd $HOME_DIR/vLLM4j/
+            ORG_REPO=$(git --no-pager config remote.origin.url | sed -E 's/git@github.com:(.*).git/\1/')
+            git remote set-url origin "https://$GITHUB_TOKEN@github.com/$ORG_REPO.git"
+
+  install-java-macos:
+    steps:
+      - run:
+          name: Install Java 25
+          command: |
+            JDK_URL="https://download.java.net/java/GA/jdk25.0.2/b1e0dfa218384cb9959bdcb897162d4e/10/GPL/openjdk-25.0.2_macos-aarch64_bin.tar.gz"
+            INSTALL_DIR="/Library/Java/JavaVirtualMachines"
+            JDK_DIR="jdk-25.0.2.jdk"
+
+            sudo mkdir -p $INSTALL_DIR
+            cd $INSTALL_DIR
+            sudo curl -L -o jdk.tar.gz $JDK_URL
+            sudo tar -xzf jdk.tar.gz
+            sudo rm jdk.tar.gz
+
+            cd ~/
+            echo 'source ~/.zprofile' >> ~/.zshrc
+            echo 'export JAVA_HOME="'$INSTALL_DIR'/'$JDK_DIR'/Contents/Home"' >> ~/.zprofile
+            echo 'export PATH="$JAVA_HOME/bin:$PATH"' >> ~/.zprofile
+            source ~/.zprofile
+
+  install-maven-macos:
+    steps:
+      - run:
+          name: Install Maven
+          command: |
+            brew install maven
+            source ~/.zprofile
+
+  install-python-macos:
+    steps:
+      - run:
+          name: Install Python 3.12 + uv
+          command: |
+            brew install python@3.12
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
+            source ~/.zprofile
+
+  install_dependencies:
+    steps:
+      - run:
+          name: Upgrade
+          command: |
+            export DEBIAN_FRONTEND=noninteractive
+            sudo apt -y update && sudo apt-get upgrade -y
+      - run:
+          name: Locale dependencies
+          command: |
+            export DEBIAN_FRONTEND=noninteractive
+            export TZ=Etc/UTC
+            sudo apt -y install locales git jq curl wget tzdata
+            sudo locale-gen C.UTF-8
+      - gh/install
+
+  install_java_dependencies:
+    steps:
+      - run:
+          name: Java dependencies
+          command: |
+            sudo apt -y install maven
+
+            JDK_URL="https://download.java.net/java/GA/jdk25.0.2/b1e0dfa218384cb9959bdcb897162d4e/10/GPL/openjdk-25.0.2_linux-x64_bin.tar.gz"
+            INSTALL_DIR="/usr/lib/jvm/jdk-25.0.2"
+
+            sudo mkdir -p $INSTALL_DIR
+            curl -L -o /tmp/jdk.tar.gz $JDK_URL
+            sudo tar -xzf /tmp/jdk.tar.gz -C $INSTALL_DIR --strip-components=1
+            rm /tmp/jdk.tar.gz
+
+            echo "export JAVA_HOME=$INSTALL_DIR" >> $BASH_ENV
+            echo "export PATH=$INSTALL_DIR/bin:\$PATH" >> $BASH_ENV
+            source $BASH_ENV
+
+  install_python_dependencies:
+    steps:
+      - run:
+          name: Python dependencies
+          command: |
+            sudo apt -y install python3.12 python3.12-dev python3.12-venv unzip build-essential
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> $BASH_ENV
+            source $BASH_ENV
+
+  install_dependencies_jextract:
+    steps:
+      - run:
+          name: jextract dependencies
+          command: sudo apt -y install unzip build-essential
+
+  setup_venv:
+    description: Create Python venv and install vLLM (needed for jextract to resolve Python.h)
+    parameters:
+      os:
+        type: string
+      backend:
+        type: string
+    steps:
+      - run:
+          name: Setup venv (<< parameters.backend >> backend)
+          command: |
+            cd $HOME_DIR/vLLM4j
+            if [[ << parameters.os >> == "macosx" ]]; then
+              source ~/.zprofile
+            elif [[ << parameters.os >> == "linux" ]]; then
+              source $BASH_ENV
+            fi
+            bash scripts/setup-venv.sh -d . -v 3.12 -b << parameters.backend >>
+
+  generate_sources:
+    description: Generate jextract FFM bindings for a specific platform
+    parameters:
+      os:
+        type: string
+      platform:
+        type: string
+      backend:
+        type: string
+    steps:
+      - attach_workspace:
+          at: /tmp/
+      - setup_venv:
+          os: << parameters.os >>
+          backend: << parameters.backend >>
+      - run:
+          name: Generate sources (<< parameters.os >>-<< parameters.platform >>)
+          command: |
+            cd $HOME_DIR/vLLM4j
+            cp /tmp/.gravitee.settings.xml .
+
+            if [[ << parameters.os >> == "macosx" ]]; then
+              source ~/.zprofile
+            elif [[ << parameters.os >> == "linux" ]]; then
+              source $BASH_ENV
+            fi
+
+            mvn -s .gravitee.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+      - when:
+          condition:
+            equal: ["linux", << parameters.os >>]
+          steps:
+            - persist_to_workspace:
+                root: "/home/circleci/vLLM4j"
+                paths: ["target/generated-sources/io/gravitee/vllm/linux"]
+      - when:
+          condition:
+            equal: ["macosx", << parameters.os >>]
+          steps:
+            - persist_to_workspace:
+                root: "/Users/distiller/vLLM4j"
+                paths: ["target/generated-sources/io/gravitee/vllm/macosx"]
+
+  run-tests:
+    description: Run unit + integration tests
+    parameters:
+      os:
+        type: string
+      platform:
+        type: string
+      backend:
+        type: string
+      run_integration:
+        type: boolean
+        default: true
+      run_vlm_integration:
+        type: boolean
+        default: false
+    steps:
+      - attach_workspace:
+          at: /tmp/
+      - setup_venv:
+          os: << parameters.os >>
+          backend: << parameters.backend >>
+      - run:
+          name: Run Unit Tests
+          environment:
+            MAVEN_OPTS: "-Xmx8g -Xms2g"
+          command: |
+            cd $HOME_DIR/vLLM4j
+            cp /tmp/.gravitee.settings.xml .
+
+            if [[ << parameters.os >> == "macosx" ]]; then
+              source ~/.zprofile
+            elif [[ << parameters.os >> == "linux" ]]; then
+              source $BASH_ENV
+            fi
+
+            mvn -s .gravitee.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+            mvn -s .gravitee.settings.xml install -DskipTests=false
+      - when:
+          condition: << parameters.run_integration >>
+          steps:
+            - run:
+                name: Run Integration Tests
+                environment:
+                  MAVEN_OPTS: "-Xmx8g -Xms2g"
+                no_output_timeout: 30m
+                command: |
+                  cd $HOME_DIR/vLLM4j
+
+                  if [[ << parameters.os >> == "macosx" ]]; then
+                    source ~/.zprofile
+                  elif [[ << parameters.os >> == "linux" ]]; then
+                    source $BASH_ENV
+                  fi
+
+                  mvn -s .gravitee.settings.xml test -Pintegration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+      - when:
+          condition: << parameters.run_vlm_integration >>
+          steps:
+            - run:
+                name: Run VLM Integration Tests
+                environment:
+                  MAVEN_OPTS: "-Xmx8g -Xms2g"
+                no_output_timeout: 30m
+                command: |
+                  cd $HOME_DIR/vLLM4j
+
+                  if [[ << parameters.os >> == "macosx" ]]; then
+                    source ~/.zprofile
+                  elif [[ << parameters.os >> == "linux" ]]; then
+                    source $BASH_ENV
+                  fi
+
+                  mvn -s .gravitee.settings.xml test -Pvlm-integration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+
+  release_tag:
+    steps:
+      - attach_workspace:
+          at: vLLM4j
+      - run:
+          name: Install npm
+          command: |
+            curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+            apt install -y nodejs
+            node -v
+            npm -v
+      - run:
+          name: Install semantic-release
+          command: |
+            npm install -g \
+              semver \
+              conventional-changelog-cli \
+              conventional-recommended-bump \
+              conventional-changelog-conventionalcommits \
+      - run:
+          name: Tag release version
+          command: bash -x $HOME_DIR/vLLM4j/scripts/release_tag.sh
+      - persist_to_workspace:
+          root: "/home/circleci/"
+          paths: ["vLLM4j"]
+
+  github_release:
+    steps:
+      - attach_workspace:
+          at: .
+      - gh/install
+      - git_config
+      - git_auth
+      - gh/setup
+      - run:
+          name: Github Release
+          command: bash $HOME_DIR/vLLM4j/scripts/github_release.sh
+
+  maven_deploy_artifactory:
+    steps:
+      - attach_workspace:
+          at: .
+      - prepare-gpg
+      - run:
+          name: Maven Deploy
+          command: |
+            cd $HOME_DIR/vLLM4j/
+            mvn -s .gravitee.settings.xml -B -P gio-artifactory-release,gio-release deploy -DskipTests=true
+
+  maven_deploy_nexus:
+    steps:
+      - attach_workspace:
+          at: .
+      - prepare-gpg
+      - run:
+          name: Maven Deploy
+          command: |
+            cd $HOME_DIR/vLLM4j/
+            mvn deploy -DskipTests -Dskip.validation --no-transfer-progress -s .gravitee.settings.xml -P gravitee-release
+
+  prepare-gpg:
+    description: Prepare GPG command
+    steps:
+      - keeper/install
+      - run:
+          command: |
+            ksm secret notation keeper://riW92t8X4tk4ZmQc8-FZ4Q/custom_field/armor_format_pub_key > pub.key
+            gpg --import pub.key
+
+            ksm secret notation keeper://riW92t8X4tk4ZmQc8-FZ4Q/custom_field/armor_format_private_key > private.key
+            gpg --import --batch private.key
+
+jobs:
+  setup:
+    docker:
+      - image: "cimg/base:stable"
+    resource_class: small
+    steps:
+      - keeper/env-export:
+          secret-url: keeper://7CgijuGiFDSLynRJt1Dm9w/custom_field/xml
+          var-name: MAVEN_SETTINGS
+      - run:
+          command: echo $MAVEN_SETTINGS > .gravitee.settings.xml
+      - persist_to_workspace:
+          root: .
+          paths:
+            - .gravitee.settings.xml
+
+  # ── Build & Test (non-main branches) ─────────────────────────────────────
+
+  build_and_test_macos:
+    executor: macos-executor
+    environment:
+      HOME_DIR: "/Users/distiller"
+    steps:
+      - install-java-macos
+      - install-maven-macos
+      - install-python-macos
+      - checkout:
+          path: "/Users/distiller/vLLM4j"
+      - run-tests:
+          os: "macosx"
+          platform: "aarch64"
+          backend: "metal"
+          run_integration: true
+          run_vlm_integration: false
+
+  build_and_test_linux_x86_64:
+    executor: ubuntu_linux_x86_64
+    environment:
+      HOME_DIR: "/home/circleci"
+    steps:
+      - install_dependencies
+      - install_java_dependencies
+      - install_python_dependencies
+      - checkout:
+          path: "/home/circleci/vLLM4j"
+      - run-tests:
+          os: "linux"
+          platform: "x86_64"
+          backend: "cuda"
+          run_integration: false
+          run_vlm_integration: false
+
+  # ── Source Generation (main branch — for release) ────────────────────────
+
+  build_sources_macos:
+    executor: macos-executor
+    environment:
+      HOME_DIR: "/Users/distiller"
+    steps:
+      - install-java-macos
+      - install-maven-macos
+      - install-python-macos
+      - checkout:
+          path: "/Users/distiller/vLLM4j"
+      - generate_sources:
+          os: "macosx"
+          platform: "aarch64"
+          backend: "metal"
+
+  build_sources_linux_x86_64:
+    executor: ubuntu_linux_x86_64
+    environment:
+      HOME_DIR: "/home/circleci"
+    steps:
+      - install_dependencies
+      - install_java_dependencies
+      - install_python_dependencies
+      - checkout:
+          path: "/home/circleci/vLLM4j"
+      - generate_sources:
+          os: "linux"
+          platform: "x86_64"
+          backend: "cuda"
+
+  # ── Release & Deploy ─────────────────────────────────────────────────────
+
+  release_tag:
+    executor: ubuntu_linux_x86_64
+    environment:
+      HOME_DIR: "/home/circleci/"
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+    steps:
+      - install_dependencies
+      - install_java_dependencies
+      - checkout:
+          path: "/home/circleci/vLLM4j"
+      - git_config
+      - release_tag
+
+  github_release:
+    executor: ubuntu_linux_x86_64
+    environment:
+      HOME_DIR: "/home/circleci/"
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+    steps:
+      - install_dependencies
+      - install_java_dependencies
+      - github_release
+
+  maven_deploy_artifactory:
+    executor: ubuntu_linux_x86_64
+    environment:
+      HOME_DIR: "/home/circleci/"
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+    steps:
+      - install_dependencies
+      - install_java_dependencies
+      - install_dependencies_jextract
+      - maven_deploy_artifactory
+
+  maven_deploy_nexus:
+    executor: ubuntu_linux_x86_64
+    environment:
+      HOME_DIR: "/home/circleci/"
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+    steps:
+      - install_dependencies
+      - install_java_dependencies
+      - install_dependencies_jextract
+      - maven_deploy_nexus
+
+parameters:
+  gio_action:
+    type: enum
+    enum: [push_commit]
+    default: push_commit
+    description: ""
+
+workflows:
+  version: 2
+
+  # Non-main branches: build + test on both platforms
+  build-and-test:
+    when:
+      and:
+        - equal: [push_commit, << pipeline.parameters.gio_action >>]
+        - not:
+            equal: ["main", << pipeline.git.branch >>]
+    jobs:
+      - setup:
+          name: Setup
+          context:
+            - cicd-orchestrator
+      - build_and_test_macos:
+          name: Build and Test -- MacOs
+          requires:
+            - Setup
+          context:
+            - cicd-orchestrator
+      - build_and_test_linux_x86_64:
+          name: Build and Test -- Linux x86_64
+          requires:
+            - Setup
+          context:
+            - cicd-orchestrator
+
+  # Main branch: build + test on both platforms (release disabled for now)
+  build-and-test-main:
+    when:
+      and:
+        - equal: [push_commit, << pipeline.parameters.gio_action >>]
+        - equal: ["main", << pipeline.git.branch >>]
+    jobs:
+      - setup:
+          name: Setup
+          context:
+            - cicd-orchestrator
+      - build_and_test_macos:
+          name: Build and Test -- MacOs
+          requires:
+            - Setup
+          context:
+            - cicd-orchestrator
+      - build_and_test_linux_x86_64:
+          name: Build and Test -- Linux x86_64
+          requires:
+            - Setup
+          context:
+            - cicd-orchestrator
+
+  # ── Release workflow (disabled — uncomment when ready to deploy) ──────────
+  # semantic_release:
+  #   when:
+  #     and:
+  #       - equal: [push_commit, << pipeline.parameters.gio_action >>]
+  #       - equal: ["main", << pipeline.git.branch >>]
+  #   jobs:
+  #     - setup:
+  #         name: Setup
+  #         context:
+  #           - cicd-orchestrator
+  #     - build_sources_linux_x86_64:
+  #         name: Build sources - Linux
+  #         requires:
+  #           - Setup
+  #         context:
+  #           - cicd-orchestrator
+  #     - build_sources_macos:
+  #         name: Build sources - Macosx
+  #         requires:
+  #           - Setup
+  #         context:
+  #           - cicd-orchestrator
+  #     - release_tag:
+  #         name: Release Tag
+  #         requires:
+  #           - Build sources - Linux
+  #           - Build sources - Macosx
+  #         context:
+  #           - cicd-orchestrator
+  #     - github_release:
+  #         name: Github Release
+  #         requires:
+  #           - Release Tag
+  #         context:
+  #           - cicd-orchestrator
+  #     - maven_deploy_artifactory:
+  #         name: Maven Deploy on Artifactory
+  #         requires:
+  #           - Release Tag
+  #         context:
+  #           - cicd-orchestrator
+  #     - maven_deploy_nexus:
+  #         name: Maven Deploy on Nexus
+  #         requires:
+  #           - Release Tag
+  #         context:
+  #           - cicd-orchestrator
