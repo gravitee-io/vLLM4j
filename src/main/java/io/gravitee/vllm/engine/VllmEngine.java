@@ -162,9 +162,14 @@ public final class VllmEngine implements AutoCloseable {
       PythonTypes.decref(engineArgsKwargs);
       PythonTypes.decref(engineArgsClass);
 
+      // Smart V0/V1 engine selection: distributed configs require V1's
+      // SyncMPClient → EngineCore architecture for subprocess-based GPU
+      // workers. Single-GPU mode stays on V0 (in-process, no subprocesses).
       MemorySegment llmEngineClass = PythonCall.importClass(
         arena,
-        "vllm.engine.llm_engine",
+        builder.isDistributed()
+          ? "vllm.v1.engine.llm_engine"
+          : "vllm.engine.llm_engine",
         "LLMEngine"
       );
       MemorySegment fromEngineArgs = PythonTypes.getAttr(
@@ -1290,6 +1295,37 @@ public final class VllmEngine implements AutoCloseable {
         "enable_sleep_mode",
         PythonTypes.pyTrue()
       );
+    }
+
+    // Distributed inference configuration
+    if (b.tensorParallelSize() != null) {
+      PythonTypes.putDictInt(
+        arena,
+        kwargs,
+        "tensor_parallel_size",
+        b.tensorParallelSize()
+      );
+    }
+    if (b.pipelineParallelSize() != null) {
+      PythonTypes.putDictInt(
+        arena,
+        kwargs,
+        "pipeline_parallel_size",
+        b.pipelineParallelSize()
+      );
+    }
+    if (b.distributedExecutorBackend() != null) {
+      MemorySegment pyBackend = PythonTypes.pyStr(
+        arena,
+        b.distributedExecutorBackend()
+      );
+      PythonTypes.putDictObj(
+        arena,
+        kwargs,
+        "distributed_executor_backend",
+        pyBackend
+      );
+      PythonTypes.decref(pyBackend);
     }
 
     return kwargs;

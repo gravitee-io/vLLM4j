@@ -34,30 +34,30 @@ class VllmBackendTest {
       .containsEntry("VLLM_METAL_USE_MLX", "1")
       .containsEntry("VLLM_MLX_DEVICE", "gpu")
       .containsEntry("GLOO_SOCKET_IFNAME", "lo0")
-      .containsEntry("VLLM_ENABLE_V1_MULTIPROCESSING", "0");
+      .doesNotContainKey("VLLM_ENABLE_V1_MULTIPROCESSING");
   }
 
   @Test
-  void cuda_shouldHaveMultiprocessingDisabled() {
-    assertThat(VllmBackend.CUDA.envVars()).containsEntry(
-      "VLLM_ENABLE_V1_MULTIPROCESSING",
-      "0"
-    );
+  void cuda_shouldHaveEmptyEnvVars() {
+    assertThat(VllmBackend.CUDA.envVars()).isEmpty();
   }
 
   @Test
   void cpu_shouldHaveExpectedEnvVars() {
     assertThat(VllmBackend.CPU.envVars())
       .containsEntry("VLLM_TARGET_DEVICE", "cpu")
-      .containsEntry("VLLM_ENABLE_V1_MULTIPROCESSING", "0");
+      .doesNotContainKey("VLLM_ENABLE_V1_MULTIPROCESSING");
   }
 
   @Test
-  void allBackends_shouldHaveMultiprocessingDisabled() {
+  void allBackends_shouldNotContainMultiprocessingFlag() {
     for (VllmBackend backend : VllmBackend.values()) {
       assertThat(backend.envVars())
-        .as("Backend %s should disable V1 multiprocessing", backend)
-        .containsEntry("VLLM_ENABLE_V1_MULTIPROCESSING", "0");
+        .as(
+          "Backend %s should not contain VLLM_ENABLE_V1_MULTIPROCESSING (managed by builder)",
+          backend
+        )
+        .doesNotContainKey("VLLM_ENABLE_V1_MULTIPROCESSING");
     }
   }
 }

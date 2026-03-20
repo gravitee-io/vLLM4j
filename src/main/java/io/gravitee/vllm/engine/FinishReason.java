@@ -33,7 +33,13 @@ public enum FinishReason {
   ABORT("abort"),
 
   /** Model produced a tool call (detected by tag-boundary FSM). */
-  TOOL_CALL("tool_calls");
+  TOOL_CALL("tool_calls"),
+
+  /** Engine-side error during generation (V1 only). */
+  ERROR("error"),
+
+  /** Repetition detected by the engine (V1 only). */
+  REPETITION("repetition");
 
   private final String label;
 
@@ -59,6 +65,8 @@ public enum FinishReason {
       case "length" -> LENGTH;
       case "abort" -> ABORT;
       case "tool_calls" -> TOOL_CALL;
+      case "error" -> ERROR;
+      case "repetition" -> REPETITION;
       default -> STOP; // unknown reasons treated as stop
     };
   }
