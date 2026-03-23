@@ -1354,10 +1354,21 @@ public final class VllmEngine implements AutoCloseable {
     }
     PythonTypes.decref(pyOutputs);
 
-    // prompt_token_ids (may be None)
-    List<Integer> promptTokenIds = mapIntList(
-      PythonTypes.getAttr(arena, pyReqOut, "prompt_token_ids")
+    // prompt_token_ids — just get the count via PyList_Size
+    int numPromptTokens = 0;
+    MemorySegment pyPromptIds = PythonTypes.getAttr(
+      arena,
+      pyReqOut,
+      "prompt_token_ids"
     );
+    if (!PythonTypes.isNone(pyPromptIds) && !PythonTypes.isNull(pyPromptIds)) {
+      long len = CPythonBinding.PyList_Size(pyPromptIds);
+      if (len >= 0) {
+        numPromptTokens = (int) len;
+      }
+      CPythonBinding.PyErr_Clear();
+    }
+    PythonTypes.decref(pyPromptIds);
 
     // num_cached_tokens (may be None → 0)
     int numCachedTokens = 0;
@@ -1372,10 +1383,10 @@ public final class VllmEngine implements AutoCloseable {
     PythonTypes.decref(pyCached);
     CPythonBinding.PyErr_Clear(); // clear any AttributeError if field missing
 
-    // metrics (may be None) — pass prompt token count from prompt_token_ids
+    // metrics
     RequestMetrics metrics = mapMetrics(
       PythonTypes.getAttr(arena, pyReqOut, "metrics"),
-      promptTokenIds != null ? promptTokenIds.size() : 0
+      numPromptTokens
     );
 
     // prompt_logprobs (may be None)
@@ -1395,7 +1406,7 @@ public final class VllmEngine implements AutoCloseable {
       requestId,
       completions,
       finished,
-      promptTokenIds,
+      null,
       numCachedTokens,
       metrics,
       promptLogprobs
@@ -1528,6 +1539,12 @@ public final class VllmEngine implements AutoCloseable {
       return List.of();
     }
     long size = CPythonBinding.PyList_Size(pyList);
+    if (size < 0) {
+      // Not a list (V1 may return a tuple) — skip extraction, rely on metrics
+      CPythonBinding.PyErr_Clear();
+      PythonTypes.decref(pyList);
+      return List.of();
+    }
     List<Integer> result = new ArrayList<>((int) size);
     for (long i = 0; i < size; i++) {
       MemorySegment item = CPythonBinding.PyList_GetItem(pyList, i); // borrowed
