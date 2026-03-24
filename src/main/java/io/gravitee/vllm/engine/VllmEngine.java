@@ -1297,6 +1297,23 @@ public final class VllmEngine implements AutoCloseable {
       );
     }
 
+    // Metal does not support chunked prefill. Disable it explicitly unless
+    // the caller has already set a value, so that vllm-metal's
+    // check_and_update_config() never reaches the branch that accesses
+    // SchedulerConfig.max_num_scheduled_tokens — a field that was
+    // introduced in vllm core after 0.16.0 and is absent in older releases.
+    if (
+      PlatformResolver.backend() == VllmBackend.METAL &&
+      b.enableChunkedPrefill() == null
+    ) {
+      PythonTypes.putDictObj(
+        arena,
+        kwargs,
+        "enable_chunked_prefill",
+        PythonTypes.pyFalse()
+      );
+    }
+
     // Distributed inference configuration
     if (b.tensorParallelSize() != null) {
       PythonTypes.putDictInt(
