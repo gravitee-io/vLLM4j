@@ -66,6 +66,11 @@ public final class VllmEngineBuilder {
   private Boolean enableChunkedPrefill;
   private String kvCacheDtype;
 
+  // Distributed inference configuration
+  private Integer tensorParallelSize;
+  private Integer pipelineParallelSize;
+  private String distributedExecutorBackend;
+
   /** Runtime initialized by {@link #initRuntime()}, reused by {@link #build()}. */
   private PythonRuntime runtime;
 
@@ -262,6 +267,54 @@ public final class VllmEngineBuilder {
   }
 
   /**
+   * Sets the tensor parallel size (number of GPUs for tensor parallelism).
+   *
+   * <p>When greater than 1, the engine automatically switches to the V1
+   * architecture ({@code vllm.v1.engine.llm_engine.LLMEngine}) and enables
+   * multiprocessing ({@code VLLM_ENABLE_V1_MULTIPROCESSING=1}).
+   *
+   * @param size number of GPUs for tensor parallelism (default: 1)
+   */
+  public VllmEngineBuilder tensorParallelSize(int size) {
+    this.tensorParallelSize = size;
+    return this;
+  }
+
+  /**
+   * Sets the pipeline parallel size (number of pipeline stages).
+   *
+   * <p>Pipeline parallelism splits the model's layers across multiple GPUs
+   * sequentially. Combined with tensor parallelism, the total GPU count is
+   * {@code tensorParallelSize × pipelineParallelSize}.
+   *
+   * @param size number of pipeline stages (default: 1)
+   */
+  public VllmEngineBuilder pipelineParallelSize(int size) {
+    this.pipelineParallelSize = size;
+    return this;
+  }
+
+  /**
+   * Sets the distributed executor backend.
+   *
+   * <p>Supported values:
+   * <ul>
+   *   <li>{@code "ray"} — uses Ray actors for GPU workers (requires a
+   *       pre-running Ray cluster)</li>
+   *   <li>{@code "mp"} — uses Python multiprocessing for GPU workers</li>
+   * </ul>
+   *
+   * <p>When set, the engine automatically switches to the V1 architecture
+   * and enables multiprocessing.
+   *
+   * @param backend the executor backend name
+   */
+  public VllmEngineBuilder distributedExecutorBackend(String backend) {
+    this.distributedExecutorBackend = backend;
+    return this;
+  }
+
+  /**
    * Sets the shared {@link Arena} for all native memory allocations.
    *
    * <p>The arena must outlive the engine. If not set, the builder creates
@@ -298,6 +351,15 @@ public final class VllmEngineBuilder {
       VllmBackend resolvedBackend = (backend != null)
         ? backend
         : PlatformResolver.backend();
+
+      // Set VLLM_ENABLE_V1_MULTIPROCESSING before Py_InitializeEx.
+      // CPython reads this at vLLM import time — it must be in the
+      // process environment before the interpreter starts.
+      PythonRuntime.setEnv(
+        "VLLM_ENABLE_V1_MULTIPROCESSING",
+        isDistributed() ? "1" : "0"
+      );
+
       runtime = new PythonRuntime(resolvedVenv, resolvedBackend);
     }
     return this;
@@ -418,5 +480,34 @@ public final class VllmEngineBuilder {
 
   String kvCacheDtype() {
     return kvCacheDtype;
+  }
+
+  Integer tensorParallelSize() {
+    return tensorParallelSize;
+  }
+
+  Integer pipelineParallelSize() {
+    return pipelineParallelSize;
+  }
+
+  String distributedExecutorBackend() {
+    return distributedExecutorBackend;
+  }
+
+  /**
+   * Returns {@code true} when the configuration requires distributed
+   * execution (V1 engine + multiprocessing).
+   *
+   * <p>Distributed mode is triggered when:
+   * <ul>
+   *   <li>{@code tensorParallelSize > 1}, or</li>
+   *   <li>{@code distributedExecutorBackend} is explicitly set</li>
+   * </ul>
+   */
+  boolean isDistributed() {
+    return (
+      (tensorParallelSize != null && tensorParallelSize > 1) ||
+      distributedExecutorBackend != null
+    );
   }
 }

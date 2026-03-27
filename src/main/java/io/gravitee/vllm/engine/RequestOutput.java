@@ -39,9 +39,9 @@ public record RequestOutput(
   RequestMetrics metrics,
   List<Map<Integer, LogprobEntry>> promptLogprobs
 ) {
-  /** Number of prompt tokens. */
+  /** Number of prompt tokens, from metrics. */
   public int numPromptTokens() {
-    return promptTokenIds != null ? promptTokenIds.size() : 0;
+    return metrics != null ? metrics.numPromptTokens() : 0;
   }
 
   /** Total generated tokens across all completions. */

@@ -43,8 +43,6 @@ import java.util.Map;
 public enum VllmBackend {
   METAL(
     Map.of(
-      "VLLM_ENABLE_V1_MULTIPROCESSING",
-      "0",
       "VLLM_METAL_USE_MLX",
       "1",
       "VLLM_MLX_DEVICE",
@@ -54,11 +52,9 @@ public enum VllmBackend {
     )
   ),
 
-  CUDA(Map.of("VLLM_ENABLE_V1_MULTIPROCESSING", "0")),
+  CUDA(Map.of()),
 
-  CPU(
-    Map.of("VLLM_ENABLE_V1_MULTIPROCESSING", "0", "VLLM_TARGET_DEVICE", "cpu")
-  );
+  CPU(Map.of("VLLM_TARGET_DEVICE", "cpu"));
 
   private final Map<String, String> envVars;
 

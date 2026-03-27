@@ -31,6 +31,8 @@ class FinishReasonTest {
       "length,  LENGTH",
       "abort,   ABORT",
       "tool_calls, TOOL_CALL",
+      "error,   ERROR",
+      "repetition, REPETITION",
     }
   )
   void fromVllmString_shouldMapKnownValues(
@@ -59,6 +61,8 @@ class FinishReasonTest {
     assertThat(FinishReason.LENGTH.label()).isEqualTo("length");
     assertThat(FinishReason.ABORT.label()).isEqualTo("abort");
     assertThat(FinishReason.TOOL_CALL.label()).isEqualTo("tool_calls");
+    assertThat(FinishReason.ERROR.label()).isEqualTo("error");
+    assertThat(FinishReason.REPETITION.label()).isEqualTo("repetition");
   }
 
   @Test

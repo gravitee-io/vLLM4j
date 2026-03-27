@@ -98,10 +98,25 @@ install_common() {
 case "$BACKEND" in
 
   metal)
-    if "$VENV_PYTHON" -c "import vllm; import vllm_metal" &>/dev/null; then
-      echo "vllm + vllm-metal already installed — skipping."
-    else
-      echo "Installing vLLM ${VLLM_VERSION} + vllm-metal (Apple Silicon Metal/MLX) ..."
+    # Check if the correct vllm version is already installed.
+    # We do NOT skip vllm-metal here: it is installed from git@main, so there
+    # is no pinned version to compare against.  Always reinstalling it is the
+    # only reliable way to avoid a stale, incompatible build being reused from
+    # a previous CI run — the symptom being:
+    #   AttributeError: 'SchedulerConfig' object has no attribute
+    #   'max_num_scheduled_tokens'
+    # which occurs when the cached vllm-metal expects a newer vllm API than
+    # the installed vllm core.
+    VLLM_OK=false
+    if "$VENV_PYTHON" -c "
+import vllm, importlib.metadata as m
+assert m.version('vllm') == '${VLLM_VERSION}', f'wrong vllm {m.version(\"vllm\")}'
+" &>/dev/null; then
+      VLLM_OK=true
+    fi
+
+    if [[ "$VLLM_OK" == "false" ]]; then
+      echo "Installing vLLM ${VLLM_VERSION} (Apple Silicon Metal/MLX) ..."
 
       # vLLM is not on PyPI for metal — install from the GitHub release tarball,
       # same as the official vllm-metal install.sh does.
@@ -125,11 +140,16 @@ case "$BACKEND" in
         --index-strategy unsafe-best-match
 
       "$UV_BIN" pip install --python "$VENV_PYTHON" "$VLLM_SRC"
-
-      # vllm-metal: install from git main (the PyPI release has a stale import path)
-      "$UV_BIN" pip install --python "$VENV_PYTHON" \
-        "vllm-metal @ git+https://github.com/vllm-project/vllm-metal.git@main"
+    else
+      echo "vllm ${VLLM_VERSION} already installed — skipping vllm core install."
     fi
+
+    # vllm-metal is always reinstalled: it tracks git@main with no pinned
+    # version, so any cached copy may be out of sync with the installed vllm
+    # core. The install is fast (~10 s) and prevents hard-to-debug mismatches.
+    echo "Installing vllm-metal (always fresh from git@main) ..."
+    "$UV_BIN" pip install --python "$VENV_PYTHON" \
+      "vllm-metal @ git+https://github.com/vllm-project/vllm-metal.git@main"
 
     install_common
     ;;

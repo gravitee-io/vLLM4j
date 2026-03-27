@@ -162,9 +162,14 @@ public final class VllmEngine implements AutoCloseable {
       PythonTypes.decref(engineArgsKwargs);
       PythonTypes.decref(engineArgsClass);
 
+      // Smart V0/V1 engine selection: distributed configs require V1's
+      // SyncMPClient → EngineCore architecture for subprocess-based GPU
+      // workers. Single-GPU mode stays on V0 (in-process, no subprocesses).
       MemorySegment llmEngineClass = PythonCall.importClass(
         arena,
-        "vllm.engine.llm_engine",
+        builder.isDistributed()
+          ? "vllm.v1.engine.llm_engine"
+          : "vllm.engine.llm_engine",
         "LLMEngine"
       );
       MemorySegment fromEngineArgs = PythonTypes.getAttr(
@@ -1292,6 +1297,54 @@ public final class VllmEngine implements AutoCloseable {
       );
     }
 
+    // Metal does not support chunked prefill. Disable it explicitly unless
+    // the caller has already set a value, so that vllm-metal's
+    // check_and_update_config() never reaches the branch that accesses
+    // SchedulerConfig.max_num_scheduled_tokens — a field that was
+    // introduced in vllm core after 0.16.0 and is absent in older releases.
+    if (
+      PlatformResolver.backend() == VllmBackend.METAL &&
+      b.enableChunkedPrefill() == null
+    ) {
+      PythonTypes.putDictObj(
+        arena,
+        kwargs,
+        "enable_chunked_prefill",
+        PythonTypes.pyFalse()
+      );
+    }
+
+    // Distributed inference configuration
+    if (b.tensorParallelSize() != null) {
+      PythonTypes.putDictInt(
+        arena,
+        kwargs,
+        "tensor_parallel_size",
+        b.tensorParallelSize()
+      );
+    }
+    if (b.pipelineParallelSize() != null) {
+      PythonTypes.putDictInt(
+        arena,
+        kwargs,
+        "pipeline_parallel_size",
+        b.pipelineParallelSize()
+      );
+    }
+    if (b.distributedExecutorBackend() != null) {
+      MemorySegment pyBackend = PythonTypes.pyStr(
+        arena,
+        b.distributedExecutorBackend()
+      );
+      PythonTypes.putDictObj(
+        arena,
+        kwargs,
+        "distributed_executor_backend",
+        pyBackend
+      );
+      PythonTypes.decref(pyBackend);
+    }
+
     return kwargs;
   }
 
@@ -1318,10 +1371,21 @@ public final class VllmEngine implements AutoCloseable {
     }
     PythonTypes.decref(pyOutputs);
 
-    // prompt_token_ids (may be None)
-    List<Integer> promptTokenIds = mapIntList(
-      PythonTypes.getAttr(arena, pyReqOut, "prompt_token_ids")
+    // prompt_token_ids — just get the count via PyList_Size
+    int numPromptTokens = 0;
+    MemorySegment pyPromptIds = PythonTypes.getAttr(
+      arena,
+      pyReqOut,
+      "prompt_token_ids"
     );
+    if (!PythonTypes.isNone(pyPromptIds) && !PythonTypes.isNull(pyPromptIds)) {
+      long len = CPythonBinding.PyList_Size(pyPromptIds);
+      if (len >= 0) {
+        numPromptTokens = (int) len;
+      }
+      CPythonBinding.PyErr_Clear();
+    }
+    PythonTypes.decref(pyPromptIds);
 
     // num_cached_tokens (may be None → 0)
     int numCachedTokens = 0;
@@ -1336,10 +1400,10 @@ public final class VllmEngine implements AutoCloseable {
     PythonTypes.decref(pyCached);
     CPythonBinding.PyErr_Clear(); // clear any AttributeError if field missing
 
-    // metrics (may be None) — pass prompt token count from prompt_token_ids
+    // metrics
     RequestMetrics metrics = mapMetrics(
       PythonTypes.getAttr(arena, pyReqOut, "metrics"),
-      promptTokenIds != null ? promptTokenIds.size() : 0
+      numPromptTokens
     );
 
     // prompt_logprobs (may be None)
@@ -1359,7 +1423,7 @@ public final class VllmEngine implements AutoCloseable {
       requestId,
       completions,
       finished,
-      promptTokenIds,
+      null,
       numCachedTokens,
       metrics,
       promptLogprobs
@@ -1492,6 +1556,12 @@ public final class VllmEngine implements AutoCloseable {
       return List.of();
     }
     long size = CPythonBinding.PyList_Size(pyList);
+    if (size < 0) {
+      // Not a list (V1 may return a tuple) — skip extraction, rely on metrics
+      CPythonBinding.PyErr_Clear();
+      PythonTypes.decref(pyList);
+      return List.of();
+    }
     List<Integer> result = new ArrayList<>((int) size);
     for (long i = 0; i < size; i++) {
       MemorySegment item = CPythonBinding.PyList_GetItem(pyList, i); // borrowed

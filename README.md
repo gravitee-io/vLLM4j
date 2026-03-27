@@ -14,7 +14,6 @@ Embeds CPython in-process, drives vLLM's synchronous `LLMEngine` directly, and e
 ```
 
 - **No HTTP server** -- vLLM runs in the same process as the JVM
-- **No Ray** -- single-process, single-GPU (or Metal) operation
 - **Continuous batching** -- multiple requests processed in parallel via `VllmIterator`
 - **Token classification** -- Java-side FSM detects reasoning (`<think>`) and tool-call tags in generated text
 

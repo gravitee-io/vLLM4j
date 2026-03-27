@@ -45,7 +45,7 @@ class RequestOutputTest {
       List.of(10, 20, 30),
       FinishReason.STOP
     );
-    var metrics = new RequestMetrics(1000.0, 0.05, 3);
+    var metrics = new RequestMetrics(1000.0, -1, -1, -1, -1, -1, 0.05, 3, 2);
     var output = new RequestOutput(
       "req-2",
       List.of(completion),
