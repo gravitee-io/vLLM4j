@@ -698,3 +698,4 @@ Token Classification:
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+See [ATTRIBUTION.md](ATTRIBUTION.md) for asset attribution.
