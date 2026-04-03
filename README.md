@@ -43,15 +43,30 @@ Supported backends:
 JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
   mvn clean package -P macosx-aarch64,metal -DskipTests
 
-# Run interactive REPL
+# Run interactive REPL (macOS)
 JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
   $JAVA_HOME/bin/java --enable-preview \
        --enable-native-access=ALL-UNNAMED \
-       -jar target/vLLM4j-1.0-SNAPSHOT.jar \
-       --model Qwen/Qwen3-0.6B
+       -Dvllm4j.venv=.venv \
+       -jar target/vLLM4j-*.jar \
+       --model Qwen/Qwen3-0.6B \
+       --reasoning_tags "<think>|</think>"
 
-# With reasoning token classification
-java -jar target/vLLM4j-1.0-SNAPSHOT.jar \
+# Run interactive REPL (Linux / CUDA)
+export LD_PRELOAD=$(python3 -c "
+import sysconfig, os, glob
+libdir = sysconfig.get_config_var('LIBDIR') or ''
+candidates = [f for pat in ['libpython*.so', 'libpython*.so.*']
+              for f in glob.glob(os.path.join(libdir, pat))]
+print(os.path.realpath(candidates[0]) if candidates
+      else os.path.realpath(os.path.join(libdir,
+           sysconfig.get_config_var('LDLIBRARY') or '')))
+")
+export TOKENIZERS_PARALLELISM=false
+export VLLM_LOGGING_LEVEL=WARNING
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+java -Dvllm4j.venv=.venv \
+     -jar target/vLLM4j-*.jar \
      --model Qwen/Qwen3-0.6B \
      --reasoning_tags "<think>|</think>"
 ```
@@ -584,6 +599,44 @@ Add the venv to your shell PATH (e.g. in `~/.zshrc` or `~/.bashrc`):
 
 ```bash
 export PATH="/path/to/vLLM4j/.venv/bin:$PATH"
+```
+
+### Environment variables
+
+The following variables are set by the example launch scripts and are worth knowing when running vLLM4j outside of them:
+
+| Variable | Recommended value | Why |
+|---|---|---|
+| `LD_PRELOAD` | `/path/to/libpython3.12.so` | Prevents `undefined symbol: PyTuple_Type` from Python extension modules (e.g. `_ctypes`) that are loaded after the JVM has already resolved libc symbols. Required on Linux. |
+| `VLLM_ATTENTION_BACKEND` | `TRITON_ATTN` | FlashInfer (the default on CUDA) performs JIT Triton compilation that crashes on GPUs with compute capability < 8.0 (e.g. RTX 2070 = sm75). Set to `TRITON_ATTN` on those cards. |
+| `TOKENIZERS_PARALLELISM` | `false` | Suppresses the HuggingFace tokenizers deadlock warning that is emitted when the tokenizer is used in a forked subprocess. |
+| `VLLM_LOGGING_LEVEL` | `WARNING` | vLLM's Python side logs at `INFO` by default, producing verbose scheduler and profiling output on every request. `WARNING` keeps the Java log clean. |
+| `VLLM_WORKER_MULTIPROC_METHOD` | `spawn` | Ensures GPU worker processes are started with `spawn` rather than `fork`. Forking after `torch.cuda.init()` causes NCCL deadlocks in multi-GPU setups. |
+
+One-liner to export all of them before launching with `java -jar`:
+
+```bash
+export LIBPYTHON_PATH=$(python3 -c "
+import sysconfig, os, glob
+libdir = sysconfig.get_config_var('LIBDIR') or ''
+candidates = [f for pat in ['libpython*.so', 'libpython*.so.*']
+              for f in glob.glob(os.path.join(libdir, pat))]
+print(os.path.realpath(candidates[0]) if candidates
+      else os.path.realpath(os.path.join(libdir,
+           sysconfig.get_config_var('LDLIBRARY') or '')))
+")
+export LD_PRELOAD="${LIBPYTHON_PATH}"
+export TOKENIZERS_PARALLELISM=false
+export VLLM_LOGGING_LEVEL=WARNING
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+java -Dvllm4j.venv=/path/to/.venv -jar your-app.jar
+```
+
+For GPUs with compute capability < 8.0 (check with `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`), also add:
+
+```bash
+export VLLM_ATTENTION_BACKEND=TRITON_ATTN
 ```
 
 ## Maven profiles
