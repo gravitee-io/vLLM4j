@@ -514,8 +514,8 @@ workflows:
           context:
             - cicd-orchestrator
 
-  # Main branch: build + test on both platforms (release disabled for now)
-  build-and-test-main:
+  # Main branch: release workflow — build sources, tag, publish
+  semantic_release:
     when:
       and:
         - equal: [push_commit, << pipeline.parameters.gio_action >>]
@@ -525,64 +525,40 @@ workflows:
           name: Setup
           context:
             - cicd-orchestrator
-      - build_and_test_macos:
-          name: Build and Test -- MacOs
+      - build_sources_linux_x86_64:
+          name: Build sources - Linux
           requires:
             - Setup
           context:
             - cicd-orchestrator
-      - build_and_test_linux_x86_64:
-          name: Build and Test -- Linux x86_64
+      - build_sources_macos:
+          name: Build sources - Macosx
           requires:
             - Setup
           context:
             - cicd-orchestrator
-
-  # ── Release workflow (disabled — uncomment when ready to deploy) ──────────
-  # semantic_release:
-  #   when:
-  #     and:
-  #       - equal: [push_commit, << pipeline.parameters.gio_action >>]
-  #       - equal: ["main", << pipeline.git.branch >>]
-  #   jobs:
-  #     - setup:
-  #         name: Setup
-  #         context:
-  #           - cicd-orchestrator
-  #     - build_sources_linux_x86_64:
-  #         name: Build sources - Linux
-  #         requires:
-  #           - Setup
-  #         context:
-  #           - cicd-orchestrator
-  #     - build_sources_macos:
-  #         name: Build sources - Macosx
-  #         requires:
-  #           - Setup
-  #         context:
-  #           - cicd-orchestrator
-  #     - release_tag:
-  #         name: Release Tag
-  #         requires:
-  #           - Build sources - Linux
-  #           - Build sources - Macosx
-  #         context:
-  #           - cicd-orchestrator
-  #     - github_release:
-  #         name: Github Release
-  #         requires:
-  #           - Release Tag
-  #         context:
-  #           - cicd-orchestrator
-  #     - maven_deploy_artifactory:
-  #         name: Maven Deploy on Artifactory
-  #         requires:
-  #           - Release Tag
-  #         context:
-  #           - cicd-orchestrator
-  #     - maven_deploy_nexus:
-  #         name: Maven Deploy on Nexus
-  #         requires:
-  #           - Release Tag
-  #         context:
-  #           - cicd-orchestrator
+      - release_tag:
+          name: Release Tag
+          requires:
+            - Build sources - Linux
+            - Build sources - Macosx
+          context:
+            - cicd-orchestrator
+      - github_release:
+          name: Github Release
+          requires:
+            - Release Tag
+          context:
+            - cicd-orchestrator
+      - maven_deploy_artifactory:
+          name: Maven Deploy on Artifactory
+          requires:
+            - Release Tag
+          context:
+            - cicd-orchestrator
+      - maven_deploy_nexus:
+          name: Maven Deploy on Nexus
+          requires:
+            - Release Tag
+          context:
+            - cicd-orchestrator
