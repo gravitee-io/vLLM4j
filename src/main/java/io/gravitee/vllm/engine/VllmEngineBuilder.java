@@ -65,6 +65,7 @@ public final class VllmEngineBuilder {
   private Integer maxLoraRank;
   private Boolean enableChunkedPrefill;
   private String kvCacheDtype;
+  private Boolean enableSleepMode;
 
   // Distributed inference configuration
   private Integer tensorParallelSize;
@@ -263,6 +264,23 @@ public final class VllmEngineBuilder {
    */
   public VllmEngineBuilder kvCacheDtype(String kvCacheDtype) {
     this.kvCacheDtype = kvCacheDtype;
+    return this;
+  }
+
+  /**
+   * Controls whether vLLM's sleep mode is enabled on CUDA.
+   *
+   * <p>When {@code true} (the default on CUDA), the engine passes
+   * {@code enable_sleep_mode=True} to vLLM, which causes GPU memory to be
+   * allocated via {@code CuMemAllocator} (cuMemCreate/cuMemMap). This allows
+   * {@link VllmEngine#close()} to release GPU memory back to the OS without
+   * restarting the process.
+   *
+   * <p>Set to {@code false} if your vLLM version does not support sleep mode
+   * or if you encounter errors related to {@code CuMemAllocator}.
+   */
+  public VllmEngineBuilder enableSleepMode(boolean enable) {
+    this.enableSleepMode = enable;
     return this;
   }
 
@@ -480,6 +498,12 @@ public final class VllmEngineBuilder {
 
   String kvCacheDtype() {
     return kvCacheDtype;
+  }
+
+  boolean isSleepModeEnabled() {
+    // Default: enabled on CUDA, disabled elsewhere
+    if (enableSleepMode != null) return enableSleepMode;
+    return PlatformResolver.backend() == VllmBackend.CUDA;
   }
 
   Integer tensorParallelSize() {

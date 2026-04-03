@@ -79,6 +79,7 @@ public final class VllmEngine implements AutoCloseable {
   private MemorySegment loraRequestClass;
 
   private final AtomicBoolean closed = new AtomicBoolean(false);
+  private final boolean sleepModeEnabled;
 
   /**
    * Creates an {@code LLMEngine} instance using the given runtime.
@@ -89,6 +90,7 @@ public final class VllmEngine implements AutoCloseable {
    */
   public VllmEngine(Arena arena, String model, String dtype) {
     this.arena = arena;
+    this.sleepModeEnabled = PlatformResolver.backend() == VllmBackend.CUDA;
     try (var gil = GIL.acquire()) {
       MemorySegment engineArgsClass = PythonCall.importClass(
         arena,
@@ -147,6 +149,7 @@ public final class VllmEngine implements AutoCloseable {
    */
   VllmEngine(Arena arena, VllmEngineBuilder builder) {
     this.arena = arena;
+    this.sleepModeEnabled = builder.isSleepModeEnabled();
     try (var gil = GIL.acquire()) {
       MemorySegment engineArgsClass = PythonCall.importClass(
         arena,
@@ -792,7 +795,7 @@ public final class VllmEngine implements AutoCloseable {
         loraRequestClass = null;
       }
 
-      if (PlatformResolver.backend() == VllmBackend.CUDA) {
+      if (PlatformResolver.backend() == VllmBackend.CUDA && sleepModeEnabled) {
         // ── CUDA teardown: sleep → reset allocator → shutdown ────────
         // Sleep mode releases GPU memory via CuMemAllocator (cuMemCreate/cuMemMap).
         System.out.println(
@@ -1288,7 +1291,7 @@ public final class VllmEngine implements AutoCloseable {
     // CuMemAllocator (cuMemCreate/cuMemMap) instead of cudaMalloc.
     // Required for sleepEngine() to release GPU memory on close().
     // Only supported on CUDA — vllm-metal does not have CuMemAllocator.
-    if (PlatformResolver.backend() == VllmBackend.CUDA) {
+    if (b.isSleepModeEnabled()) {
       PythonTypes.putDictObj(
         arena,
         kwargs,
