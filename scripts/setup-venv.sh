@@ -33,7 +33,7 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_BASEDIR:-.}"
 PYTHON_VERSION="3.12"
 BACKEND=""
-VLLM_VERSION="0.16.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
+VLLM_VERSION="0.19.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
 
 print_usage() {
   echo "Usage: $0 -d <project_dir> -v <python_version> -b <backend>"
