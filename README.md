@@ -24,7 +24,7 @@ Embeds CPython in-process, drives vLLM's synchronous `LLMEngine` directly, and e
 | Component | Version |
 |-----------|---------|
 | Java      | 25 (with `--enable-preview`) |
-| Python    | 3.12 (miniforge recommended) |
+| Python    | 3.12 |
 | Maven     | 3.9+ |
 | uv        | For venv management |
 

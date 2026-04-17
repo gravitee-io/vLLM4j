@@ -545,6 +545,42 @@ public final class VllmEngine implements AutoCloseable {
     }
   }
 
+  /**
+   * Returns the BOS (beginning-of-sentence) token string from the tokenizer.
+   * Returns an empty string if the tokenizer has no BOS token.
+   */
+  public String getBosToken() {
+    return getSpecialToken("bos_token");
+  }
+
+  /**
+   * Returns the EOS (end-of-sentence) token string from the tokenizer.
+   * Returns an empty string if the tokenizer has no EOS token.
+   */
+  public String getEosToken() {
+    return getSpecialToken("eos_token");
+  }
+
+  private String getSpecialToken(String attrName) {
+    try (var gil = GIL.acquire()) {
+      MemorySegment tokenizer = PythonTypes.getAttr(arena, engine, "tokenizer");
+      PythonErrors.checkPythonError("engine.tokenizer");
+
+      MemorySegment pyToken = PythonTypes.getAttr(arena, tokenizer, attrName);
+      if (PythonTypes.isNone(pyToken) || PythonTypes.isNull(pyToken)) {
+        PythonTypes.decref(pyToken);
+        PythonTypes.decref(tokenizer);
+        CPythonBinding.PyErr_Clear();
+        return "";
+      }
+
+      String token = PythonTypes.pyUnicodeToString(pyToken);
+      PythonTypes.decref(pyToken);
+      PythonTypes.decref(tokenizer);
+      return token != null ? token : "";
+    }
+  }
+
   /** Returns the cached jinja2 module reference. */
   public MemorySegment jinja2Module() {
     return jinja2Module;
