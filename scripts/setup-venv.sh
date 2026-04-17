@@ -135,6 +135,14 @@ assert m.version('vllm') == '${VLLM_VERSION}', f'wrong vllm {m.version(\"vllm\")
       rm -rf "$VLLM_SRC"
       tar xf "$VLLM_TARBALL" -C /tmp
 
+      # Patch chained comparisons in CPU attention headers that newer Clang
+      # (Apple CLT ≥ 21.0 / macOS 26) rejects with -Werror=parentheses.
+      # See: static_assert(0 < M <= 8) → static_assert(0 < M && M <= 8)
+      sed -i '' 's/static_assert(0 < M <= 8)/static_assert(0 < M \&\& M <= 8)/' \
+        "$VLLM_SRC/csrc/cpu/cpu_attn_vec.hpp"
+      sed -i '' 's/static_assert(0 < M <= 16)/static_assert(0 < M \&\& M <= 16)/' \
+        "$VLLM_SRC/csrc/cpu/cpu_attn_vec16.hpp"
+
       "$UV_BIN" pip install --python "$VENV_PYTHON" \
         -r "${VLLM_SRC}/requirements/cpu.txt" \
         --index-strategy unsafe-best-match
