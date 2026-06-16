@@ -17,7 +17,7 @@ Embeds CPython in-process, drives vLLM's synchronous `LLMEngine` directly, and e
 - **Continuous batching** -- multiple requests processed in parallel via `VllmIterator`
 - **Token classification** -- Java-side FSM detects reasoning (`<think>`) and tool-call tags in generated text
 
-> Targets **vLLM 0.16.0** across all backends. The version is pinned in `VLLM_VERSION` at the top of `scripts/setup-venv.sh`.
+> Targets **vLLM 0.23.0** across all backends. The version is pinned in `VLLM_VERSION` at the top of `scripts/setup-venv.sh`.
 
 ## Requirements
 
@@ -528,7 +528,9 @@ mvn test -P macosx-aarch64,metal
 mvn test -P integration,macosx-aarch64,metal
 
 # Integration tests on Linux + CUDA
-# Requires: LD_PRELOAD and .venv/bin on PATH (see Linux / CUDA notes)
+# Requires: LD_PRELOAD (see Linux / CUDA notes). .venv/bin + CUDA_HOME are
+# wired up automatically. On pre-Ampere GPUs (sm < 80) the profile sets
+# VLLM4J_ATTENTION_BACKEND=TRITON_ATTN; see Linux / CUDA notes.
 mvn test -P integration,linux-x86_64,cuda
 ```
 
@@ -589,17 +591,21 @@ On cards with limited VRAM (8 GiB or less), both engines are configured with:
 The `/no_think` suffix is appended to system prompts so Qwen3 skips its
 internal reasoning chain, producing shorter and faster test outputs.
 
-### `ninja` and venv PATH
+### `ninja` and the CUDA build toolchain
 
 vLLM's flashinfer backend JIT-compiles CUDA kernels at first use via
-[ninja](https://ninja-build.org/). The `ninja` binary is installed inside
-`.venv/bin/` by `setup-venv.sh`, but the forked JVM needs it on `PATH`.
+[ninja](https://ninja-build.org/) and `nvcc`. vLLM4j wires this up
+automatically at interpreter startup (`PythonRuntime.configureBuildToolchain`):
+it prepends `.venv/bin` (where `setup-venv.sh` installs `ninja`) to `PATH`, and
+when the venv bundles an NVIDIA CUDA toolkit it exports `CUDA_HOME` pointing at
+it. No manual `PATH` export is required.
 
-Add the venv to your shell PATH (e.g. in `~/.zshrc` or `~/.bashrc`):
-
-```bash
-export PATH="/path/to/vLLM4j/.venv/bin:$PATH"
-```
+`setup-venv.sh` also pins the CUDA build-toolchain wheels (`nvidia-cuda-nvcc`,
+`nvidia-nvvm`, `nvidia-cuda-crt`, `nvidia-cuda-cccl`) to the CUDA version torch
+was built against. vLLM's CUDA wheel pins the CUDA *runtime* but lets these
+*build* wheels float to newer patches, which leaves flashinfer unable to
+compile its kernels (mismatched compiler/headers/ptxas); pinning them keeps the
+toolkit coherent.
 
 ### Environment variables
 
@@ -608,7 +614,7 @@ The following variables are set by the example launch scripts and are worth know
 | Variable | Recommended value | Why |
 |---|---|---|
 | `LD_PRELOAD` | `/path/to/libpython3.12.so` | Prevents `undefined symbol: PyTuple_Type` from Python extension modules (e.g. `_ctypes`) that are loaded after the JVM has already resolved libc symbols. Required on Linux. |
-| `VLLM_ATTENTION_BACKEND` | `TRITON_ATTN` | FlashInfer (the default on CUDA) performs JIT Triton compilation that crashes on GPUs with compute capability < 8.0 (e.g. RTX 2070 = sm75). Set to `TRITON_ATTN` on those cards. |
+| `VLLM4J_ATTENTION_BACKEND` | `TRITON_ATTN` | vLLM 0.23.0 no longer reads an attention-backend env var, so vLLM4j forwards this one (or the `-Dvllm4j.attentionBackend` system property) to the `attention_backend` engine arg. On GPUs with compute capability < 8.0 (e.g. RTX 2070 = sm75) vLLM auto-selects FlashInfer, whose paged-prefill kernel fails at runtime (`BatchPrefillWithPagedKVCache ... invalid argument`); set `TRITON_ATTN` on those cards. Honored on the CUDA backend only. |
 | `TOKENIZERS_PARALLELISM` | `false` | Suppresses the HuggingFace tokenizers deadlock warning that is emitted when the tokenizer is used in a forked subprocess. |
 | `VLLM_LOGGING_LEVEL` | `WARNING` | vLLM's Python side logs at `INFO` by default, producing verbose scheduler and profiling output on every request. `WARNING` keeps the Java log clean. |
 | `VLLM_WORKER_MULTIPROC_METHOD` | `spawn` | Ensures GPU worker processes are started with `spawn` rather than `fork`. Forking after `torch.cuda.init()` causes NCCL deadlocks in multi-GPU setups. |
@@ -636,7 +642,7 @@ java -Dvllm4j.venv=/path/to/.venv -jar your-app.jar
 For GPUs with compute capability < 8.0 (check with `nvidia-smi --query-gpu=compute_cap --format=csv,noheader`), also add:
 
 ```bash
-export VLLM_ATTENTION_BACKEND=TRITON_ATTN
+export VLLM4J_ATTENTION_BACKEND=TRITON_ATTN
 ```
 
 ## Maven profiles
@@ -698,4 +704,4 @@ Token Classification:
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
-See [ATTRIBUTION.md](ATTRIBUTION.md) for asset attribution.
+

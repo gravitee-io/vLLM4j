@@ -212,7 +212,7 @@
                         <artifactId>exec-maven-plugin</artifactId>
                         <version>3.6.3</version>
                         <executions>
-                            <!-- vLLM 0.16.0 uses multiprocessing.Lock() which requires
+                            <!-- vLLM uses multiprocessing.Lock() which requires
                                  POSIX named semaphores → writable /dev/shm.
                                  Some Linux setups have mode 755; fix it to 1777. -->
                             <execution>
@@ -439,6 +439,17 @@
                             <groups>integration</groups>
                             <forkCount>1</forkCount>
                             <reuseForks>false</reuseForks>
+                            <!-- Pin the attention backend for text-model
+                                 integration tests. On pre-Ampere CUDA GPUs
+                                 (e.g. Turing/sm_75) vLLM auto-selects FLASHINFER,
+                                 whose paged-prefill kernel fails at runtime
+                                 ("BatchPrefillWithPagedKVCache ... invalid
+                                 argument"); TRITON_ATTN works there. Honored
+                                 only on the CUDA backend (see VllmEngine), so it
+                                 is a no-op for metal/cpu runs of this profile. -->
+                            <environmentVariables>
+                                <VLLM4J_ATTENTION_BACKEND>TRITON_ATTN</VLLM4J_ATTENTION_BACKEND>
+                            </environmentVariables>
                         </configuration>
                     </plugin>
                 </plugins>
@@ -464,6 +475,15 @@
                             <groups>vlm-integration</groups>
                             <forkCount>1</forkCount>
                             <reuseForks>false</reuseForks>
+                            <!-- Same as the integration profile: pin TRITON_ATTN
+                                 on CUDA. On Turing/sm_75 the flashinfer attention
+                                 backend generates correctly but crashes at engine
+                                 teardown; TRITON_ATTN is stable. The VLM vision
+                                 encoder uses its own (SDPA) path, unaffected by
+                                 this language-model attention setting. -->
+                            <environmentVariables>
+                                <VLLM4J_ATTENTION_BACKEND>TRITON_ATTN</VLLM4J_ATTENTION_BACKEND>
+                            </environmentVariables>
                         </configuration>
                     </plugin>
                 </plugins>

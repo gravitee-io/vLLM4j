@@ -161,6 +161,12 @@ public final class PythonRuntime implements AutoCloseable {
     String pythonHome = resolvePythonHome(venv);
     setEnv("PYTHONHOME", pythonHome);
 
+    // Wire up the venv's build toolchain (PATH + CUDA_HOME) so flashinfer can
+    // JIT-compile CUDA kernels at engine init. Must run before Py_InitializeEx
+    // so the os module snapshots the updated environment into os.environ, which
+    // subprocess consults for executable resolution.
+    configureBuildToolchain(venv);
+
     // Set backend-specific env vars before Py_Initialize
     for (Map.Entry<String, String> entry : backend.envVars().entrySet()) {
       setEnv(entry.getKey(), entry.getValue());
@@ -453,6 +459,90 @@ public final class PythonRuntime implements AutoCloseable {
   }
 
   // ── Environment variable helper ────────────────────────────────────────
+
+  /**
+   * Wires up the build toolchain bundled in the venv so flashinfer can
+   * JIT-compile CUDA kernels during engine initialization:
+   *
+   * <ul>
+   *   <li>Prepends the venv's {@code bin} directory to {@code PATH} so
+   *       {@code ninja} (bundled by vllm&gt;=0.23.0) resolves — without it
+   *       engine init fails with
+   *       {@code "[Errno 2] No such file or directory: 'ninja'"}.</li>
+   *   <li>If the venv bundles an NVIDIA CUDA toolkit (the {@code nvidia/cuNN}
+   *       tree shipped by the {@code nvidia-cuda-*} wheels on the CUDA
+   *       backend), exports {@code CUDA_HOME} and prepends its {@code bin} so
+   *       flashinfer compiles with that toolkit rather than a stray/older
+   *       system CUDA. flashinfer resolves {@code nvcc} from {@code CUDA_HOME}
+   *       (falling back to {@code which nvcc}); the bundled {@code nvcc} is not
+   *       otherwise on {@code PATH}, so without this it would silently pick up
+   *       the system toolkit, which is generally a different version than the
+   *       torch CUDA runtime the wheels target and fails to build the
+   *       kernels.</li>
+   * </ul>
+   *
+   * <p>{@code PATH} is assembled and set in a single {@code setEnv} call:
+   * {@link System#getenv} returns the JVM's startup snapshot and never
+   * reflects our {@code setenv(3)} writes, so successive prepends each
+   * reading {@code getenv("PATH")} would clobber one another.
+   *
+   * <p>The CUDA portion is a no-op on backends without a bundled toolkit
+   * (metal, cpu).
+   *
+   * <p>Must be called before {@code Py_InitializeEx}: CPython's {@code os}
+   * module snapshots the C environment into {@code os.environ} at import time,
+   * and {@code subprocess} resolves bare executable names against that snapshot.
+   */
+  private static void configureBuildToolchain(String venvPath) {
+    String sep = java.io.File.pathSeparator;
+    StringBuilder pathPrefix = new StringBuilder();
+
+    // CUDA toolkit (if bundled) takes precedence on PATH, and sets CUDA_HOME.
+    java.nio.file.Path cudaHome = findBundledCudaToolkit(venvPath);
+    if (cudaHome != null) {
+      setEnv("CUDA_HOME", cudaHome.toString());
+      pathPrefix.append(cudaHome.resolve("bin")).append(sep);
+    }
+
+    // venv bin (ninja and other bundled executables).
+    pathPrefix.append(venvPath).append("/bin");
+
+    String current = System.getenv("PATH");
+    String updated = (current == null || current.isEmpty())
+      ? pathPrefix.toString()
+      : pathPrefix + sep + current;
+    setEnv("PATH", updated);
+  }
+
+  /**
+   * Locates a CUDA toolkit bundled in the venv at
+   * {@code <venv>/lib/python*\/site-packages/nvidia/cu*\/bin/nvcc}, returning
+   * the toolkit root (the {@code cuNN} directory) or {@code null} if none is
+   * present (e.g. metal/cpu backends).
+   */
+  private static java.nio.file.Path findBundledCudaToolkit(String venvPath) {
+    java.nio.file.Path libDir = java.nio.file.Path.of(venvPath, "lib");
+    try (
+      var pyDirs = java.nio.file.Files.newDirectoryStream(libDir, "python*")
+    ) {
+      for (java.nio.file.Path pyDir : pyDirs) {
+        java.nio.file.Path nvidiaDir = pyDir.resolve("site-packages/nvidia");
+        if (!java.nio.file.Files.isDirectory(nvidiaDir)) continue;
+        try (
+          var cuDirs = java.nio.file.Files.newDirectoryStream(nvidiaDir, "cu*")
+        ) {
+          for (java.nio.file.Path cuDir : cuDirs) {
+            if (java.nio.file.Files.isExecutable(cuDir.resolve("bin/nvcc"))) {
+              return cuDir.toAbsolutePath();
+            }
+          }
+        }
+      }
+    } catch (java.io.IOException ignored) {
+      // venv/lib missing or unreadable — no bundled toolkit to configure.
+    }
+    return null;
+  }
 
   /**
    * Sets an environment variable in-process via {@code setenv(3)}.
