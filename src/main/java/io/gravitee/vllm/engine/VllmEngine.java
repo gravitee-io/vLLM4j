@@ -1340,7 +1340,7 @@ public final class VllmEngine implements AutoCloseable {
     // the caller has already set a value, so that vllm-metal's
     // check_and_update_config() never reaches the branch that accesses
     // SchedulerConfig.max_num_scheduled_tokens — a field that was
-    // introduced in vllm core after 0.16.0 and is absent in older releases.
+    // introduced in vllm core after 0.16.0 and available in 0.23.0+.
     if (
       PlatformResolver.backend() == VllmBackend.METAL &&
       b.enableChunkedPrefill() == null

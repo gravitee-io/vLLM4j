@@ -17,7 +17,7 @@ Embeds CPython in-process, drives vLLM's synchronous `LLMEngine` directly, and e
 - **Continuous batching** -- multiple requests processed in parallel via `VllmIterator`
 - **Token classification** -- Java-side FSM detects reasoning (`<think>`) and tool-call tags in generated text
 
-> Targets **vLLM 0.16.0** across all backends. The version is pinned in `VLLM_VERSION` at the top of `scripts/setup-venv.sh`.
+> Targets **vLLM 0.23.0** across all backends. The version is pinned in `VLLM_VERSION` at the top of `scripts/setup-venv.sh`.
 
 ## Requirements
 

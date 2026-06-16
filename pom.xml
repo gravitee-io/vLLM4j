@@ -212,7 +212,7 @@
                         <artifactId>exec-maven-plugin</artifactId>
                         <version>3.6.3</version>
                         <executions>
-                            <!-- vLLM 0.16.0 uses multiprocessing.Lock() which requires
+                            <!-- vLLM uses multiprocessing.Lock() which requires
                                  POSIX named semaphores → writable /dev/shm.
                                  Some Linux setups have mode 755; fix it to 1777. -->
                             <execution>
