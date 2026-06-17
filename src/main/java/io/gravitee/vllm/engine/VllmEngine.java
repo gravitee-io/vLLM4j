@@ -842,18 +842,25 @@ public final class VllmEngine implements AutoCloseable {
         System.out.println("[vLLM4j] close: sleep done");
         System.out.flush();
 
+        // Shut down the engine core BEFORE resetting the allocator.
+        //
+        // resetCuMemAllocator() sets CuMemAllocator.instance = None and clears
+        // pointer_to_data. If that runs first, engine_core.shutdown() can touch
+        // an allocator that was just nulled out, which intermittently segfaults
+        // on some GPUs (observed on Turing/sm_75). Running shutdown() while the
+        // allocator singleton is still valid avoids that use-after-reset.
+        System.out.println("[vLLM4j] close: calling shutdownEngineCore()");
+        System.out.flush();
+        shutdownEngineCore();
+        System.out.println("[vLLM4j] close: shutdownEngineCore() done");
+        System.out.flush();
+
         // Clear CuMemAllocator.pointer_to_data so the next engine can
         // pass the get_current_usage() == 0 assertion. Then set
         // CuMemAllocator.instance = None so a fresh allocator is created.
         System.out.println("[vLLM4j] close: resetting CuMemAllocator");
         System.out.flush();
         resetCuMemAllocator();
-
-        System.out.println("[vLLM4j] close: calling shutdownEngineCore()");
-        System.out.flush();
-        shutdownEngineCore();
-        System.out.println("[vLLM4j] close: shutdownEngineCore() done");
-        System.out.flush();
 
         // After sleep(), GPU memory is released. We intentionally DO NOT
         // call decref(engine) or gc.collect() because destroying the Python
@@ -1340,7 +1347,7 @@ public final class VllmEngine implements AutoCloseable {
     // the caller has already set a value, so that vllm-metal's
     // check_and_update_config() never reaches the branch that accesses
     // SchedulerConfig.max_num_scheduled_tokens — a field that was
-    // introduced in vllm core after 0.16.0 and is absent in older releases.
+    // introduced in vllm core after 0.16.0 and available in 0.23.0+.
     if (
       PlatformResolver.backend() == VllmBackend.METAL &&
       b.enableChunkedPrefill() == null
@@ -1382,6 +1389,37 @@ public final class VllmEngine implements AutoCloseable {
         pyBackend
       );
       PythonTypes.decref(pyBackend);
+    }
+
+    // Attention backend override.
+    //
+    // vLLM 0.23.0 no longer reads any attention-backend environment variable —
+    // the backend is only settable via the attention_backend engine arg — so we
+    // forward VLLM4J_ATTENTION_BACKEND (or the vllm4j.attentionBackend system
+    // property, which takes precedence) to it. This lets the runtime/test
+    // environment pin a backend without recompiling.
+    //
+    // The motivating case: on pre-Ampere GPUs (e.g. Turing / sm_75) vLLM
+    // auto-selects FLASHINFER for text models — FLASH_ATTN needs sm_80+, and
+    // FLASHINFER's supports_compute_capability() optimistically claims Turing
+    // support — but its paged-prefill kernel fails at runtime with
+    // "BatchPrefillWithPagedKVCache failed with error invalid argument".
+    // Setting TRITON_ATTN works around it. Left unset, vLLM auto-selects.
+    //
+    // Honored on CUDA only: the named backends (TRITON_ATTN, FLASHINFER, …) are
+    // CUDA-specific, so on metal/cpu we ignore the override rather than forward
+    // an invalid backend — this lets a backend-agnostic build profile set the
+    // variable unconditionally without breaking non-CUDA runs.
+    if (PlatformResolver.backend() == VllmBackend.CUDA) {
+      String attnBackend = System.getProperty(
+        "vllm4j.attentionBackend",
+        System.getenv("VLLM4J_ATTENTION_BACKEND")
+      );
+      if (attnBackend != null && !attnBackend.isBlank()) {
+        MemorySegment pyAttn = PythonTypes.pyStr(arena, attnBackend.strip());
+        PythonTypes.putDictObj(arena, kwargs, "attention_backend", pyAttn);
+        PythonTypes.decref(pyAttn);
+      }
     }
 
     return kwargs;

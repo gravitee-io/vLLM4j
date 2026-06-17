@@ -33,7 +33,7 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_BASEDIR:-.}"
 PYTHON_VERSION="3.12"
 BACKEND=""
-VLLM_VERSION="0.19.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
+VLLM_VERSION="0.23.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
 
 print_usage() {
   echo "Usage: $0 -d <project_dir> -v <python_version> -b <backend>"
@@ -91,8 +91,41 @@ VENV_PYTHON="${VENV_DIR}/bin/python"
 
 install_common() {
   # jinja2 is the only dependency vLLM does not pull in transitively.
-  # ninja, setuptools, and transformers are all bundled by vllm>=0.16.0.
+  # ninja, setuptools, and transformers are all bundled by vllm>=0.23.0.
   "$UV_BIN" pip install --python "$VENV_PYTHON" jinja2
+}
+
+# Aligns the CUDA build toolchain (nvcc, nvvm/cicc, crt, cccl) to the CUDA
+# version torch was built against.
+#
+# vLLM's CUDA wheel pins the CUDA *runtime* (nvidia-cuda-runtime) to torch's
+# CUDA version (e.g. 13.0), but the build-time toolchain wheels are not pinned
+# and float to the newest available patch (e.g. nvcc/nvvm 13.2, crt/cccl 13.3).
+# flashinfer JIT-compiles its sampling kernels at engine init using this
+# toolchain, and a mixed toolchain fails to build:
+#   - cccl headers reject a compiler whose version differs from the CTK headers
+#     ("CUDA compiler and CUDA toolkit headers are incompatible")
+#   - a newer cicc emits PTX the older ptxas can't assemble
+#     ("Unsupported .version 9.2; current version is '9.0'")
+#   - a newer crt host_runtime.h and older cudafe++ disagree on the device-stub
+#     ABI ("'__cudaLaunch' was not declared in this scope")
+#
+# Pinning the toolchain to torch's CUDA major.minor (==X.Y.*) keeps the
+# compiler, assembler and headers coherent so the kernels build.
+align_cuda_toolchain() {
+  local cuda_mm
+  cuda_mm="$("$VENV_PYTHON" -c 'import torch; print(torch.version.cuda or "")')"
+  if [[ -z "$cuda_mm" ]]; then
+    echo "Could not determine torch CUDA version — skipping toolchain alignment."
+    return 0
+  fi
+
+  echo "Aligning CUDA build toolchain to ${cuda_mm}.* (matches torch) ..."
+  "$UV_BIN" pip install --python "$VENV_PYTHON" \
+    "nvidia-cuda-nvcc==${cuda_mm}.*" \
+    "nvidia-nvvm==${cuda_mm}.*" \
+    "nvidia-cuda-crt==${cuda_mm}.*" \
+    "nvidia-cuda-cccl==${cuda_mm}.*"
 }
 
 case "$BACKEND" in
@@ -135,14 +168,6 @@ assert m.version('vllm') == '${VLLM_VERSION}', f'wrong vllm {m.version(\"vllm\")
       rm -rf "$VLLM_SRC"
       tar xf "$VLLM_TARBALL" -C /tmp
 
-      # Patch chained comparisons in CPU attention headers that newer Clang
-      # (Apple CLT ≥ 21.0 / macOS 26) rejects with -Werror=parentheses.
-      # See: static_assert(0 < M <= 8) → static_assert(0 < M && M <= 8)
-      sed -i '' 's/static_assert(0 < M <= 8)/static_assert(0 < M \&\& M <= 8)/' \
-        "$VLLM_SRC/csrc/cpu/cpu_attn_vec.hpp"
-      sed -i '' 's/static_assert(0 < M <= 16)/static_assert(0 < M \&\& M <= 16)/' \
-        "$VLLM_SRC/csrc/cpu/cpu_attn_vec16.hpp"
-
       "$UV_BIN" pip install --python "$VENV_PYTHON" \
         -r "${VLLM_SRC}/requirements/cpu.txt" \
         --index-strategy unsafe-best-match
@@ -152,12 +177,10 @@ assert m.version('vllm') == '${VLLM_VERSION}', f'wrong vllm {m.version(\"vllm\")
       echo "vllm ${VLLM_VERSION} already installed — skipping vllm core install."
     fi
 
-    # vllm-metal is always reinstalled: it tracks git@main with no pinned
-    # version, so any cached copy may be out of sync with the installed vllm
-    # core. The install is fast (~10 s) and prevents hard-to-debug mismatches.
-    echo "Installing vllm-metal (always fresh from git@main) ..."
+    # Install prebuilt vllm-metal wheel from GitHub release (includes Metal kernels compiled and ready to use)
+    echo "Installing vllm-metal (prebuilt wheel) ..."
     "$UV_BIN" pip install --python "$VENV_PYTHON" \
-      "vllm-metal @ git+https://github.com/vllm-project/vllm-metal.git@main"
+      "https://github.com/vllm-project/vllm-metal/releases/download/v0.3.0.dev20260616093506/vllm_metal-0.3.0.dev20260616093506-cp312-cp312-macosx_11_0_arm64.whl"
 
     install_common
     ;;
@@ -173,6 +196,7 @@ assert m.version('vllm') == '${VLLM_VERSION}', f'wrong vllm {m.version(\"vllm\")
     fi
 
     install_common
+    align_cuda_toolchain
     ;;
 
   cpu)

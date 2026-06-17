@@ -72,20 +72,20 @@ class VlmIteratorTest {
   // ═══════════════════════════════════════════════════════════════════
 
   private static byte[] loadTestImage() throws IOException {
-    try (var is = VlmIteratorTest.class.getResourceAsStream("/dog.jpg")) {
+    try (var is = VlmIteratorTest.class.getResourceAsStream("/man.jpg")) {
       if (is == null) {
-        throw new IOException("Test resource /dog.jpg not found on classpath");
+        throw new IOException("Test resource /man.jpg not found on classpath");
       }
       return is.readAllBytes();
     }
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  //  Single image — model identifies a dog
+  //  Single image — model identifies a man
   // ═══════════════════════════════════════════════════════════════════
 
   @Test
-  void vlm_describes_dog_image() throws IOException {
+  void vlm_describes_man_image() throws IOException {
     byte[] imageBytes = loadTestImage();
 
     // Build multimodal content parts (OpenAI format)
@@ -95,17 +95,14 @@ class VlmIteratorTest {
         "type",
         "text",
         "text",
-        "What animal is in this picture? Answer in one word."
+        "Who is in this picture? Answer in one word."
       )
     );
 
     String prompt = chatTemplate.render(
       List.of(
         ChatMessage.system("You are a helpful assistant. /no_think"),
-        ChatMessage.userWithParts(
-          "What animal is in this picture?",
-          contentParts
-        )
+        ChatMessage.userWithParts("Who is in this picture?", contentParts)
       ),
       true
     );
@@ -115,7 +112,7 @@ class VlmIteratorTest {
     try (
       var sp = new SamplingParams(engine.arena()).temperature(0.0).maxTokens(32)
     ) {
-      var request = new VllmRequest("req-vlm-dog", prompt, sp, mmData);
+      var request = new VllmRequest("req-vlm-man", prompt, sp, mmData);
 
       RequestOutput output = engine.generate(request);
 
@@ -125,13 +122,13 @@ class VlmIteratorTest {
 
       String text = output.outputs().getFirst().text().toLowerCase();
 
-      System.out.println("\n=== VLM Dog Image Result ===");
+      System.out.println("\n=== VLM Man Image Result ===");
       System.out.println("Output: " + output.outputs().getFirst().text());
       System.out.println("Prompt tokens: " + output.numPromptTokens());
       System.out.println("Generated tokens: " + output.numGeneratedTokens());
       System.out.println("============================");
 
-      assertThat(text).matches(".*\\b(dog|puppy|spaniel|canine)\\b.*");
+      assertThat(text).matches(".*\\b(man|person|human|male|boy|guy)\\b.*");
     }
   }
 
