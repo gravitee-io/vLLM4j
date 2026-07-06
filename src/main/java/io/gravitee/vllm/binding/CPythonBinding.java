@@ -21,6 +21,9 @@ import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Reflection-based dispatch layer for the jextract-generated CPython FFM bindings.
@@ -205,6 +208,30 @@ public final class CPythonBinding {
     String innerClassName,
     MemoryLayout... layouts
   ) {
+    // Cached: everything below — the class lookup, the reflective method
+    // lookups and the downcall linkage — depends only on the class name and the
+    // layouts, yet this sits on the per-token path (every step() and every
+    // has_unfinished_requests()). Rebuilding it per call made
+    // java.lang.reflect.Method the single largest allocation site in a profile
+    // of the decode loop, with Class[], MethodList and WeakReference behind it.
+    return INVOKERS.computeIfAbsent(
+      new InvokerKey(innerClassName, List.of(layouts)),
+      CPythonBinding::createVariadicInvoker
+    );
+  }
+
+  /** Key for the invoker cache: the target function and its argument layouts. */
+  private record InvokerKey(
+    String innerClassName,
+    List<MemoryLayout> layouts
+  ) {}
+
+  private static final Map<InvokerKey, VariadicInvoker> INVOKERS =
+    new ConcurrentHashMap<>();
+
+  private static VariadicInvoker createVariadicInvoker(InvokerKey key) {
+    String innerClassName = key.innerClassName();
+    MemoryLayout[] layouts = key.layouts().toArray(new MemoryLayout[0]);
     try {
       String fullClassName = basePackage + "CPython";
       Class<?> outerClass = Class.forName(fullClassName);

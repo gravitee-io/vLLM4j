@@ -135,16 +135,19 @@ if [[ -z "$LIBPYTHON_ABS" || ! -f "$LIBPYTHON_ABS" ]]; then
 fi
 
 echo "libpython resolved at: ${LIBPYTHON_ABS}"
-echo "${LIBPYTHON_ABS}" > "${PROJECT_DIR}/.libpython-path"
-LIBPYTHON_DIR="$(dirname "$LIBPYTHON_ABS")"
-echo "${LIBPYTHON_DIR}" > "${PROJECT_DIR}/.libpython-dir"
-echo "libpython.path=${LIBPYTHON_ABS}" > "${PROJECT_DIR}/python.properties"
-
-# Resolve the base Python prefix (sys.base_prefix) — this is what PYTHONHOME must be
-# set to. A uv venv only contains site-packages; the stdlib lives in the base install.
-PYTHON_HOME="$("$VENV_PYTHON" -c "import sys; print(sys.base_prefix)")"
-echo "Python base prefix (PYTHONHOME): ${PYTHON_HOME}"
-echo "${PYTHON_HOME}" > "${PROJECT_DIR}/.python-home"
+# Symlink libpython into the venv so it has a stable, project-relative path:
+#   .venv/lib/libpython<version>.<ext>
+# The Linux Maven profile points LD_PRELOAD here for Surefire, and users can
+# do the same (export LD_PRELOAD=$PWD/.venv/lib/libpython3.12.so) without
+# hunting down the base interpreter's lib directory.
+case "$LIBPYTHON_ABS" in
+  *.so*) LIBPYTHON_EXT="so" ;;
+  # .dylib, or the extension-less macOS framework binary ("Python")
+  *)     LIBPYTHON_EXT="dylib" ;;
+esac
+mkdir -p "${VENV_DIR}/lib"
+ln -sfn "$LIBPYTHON_ABS" "${VENV_DIR}/lib/libpython${PYTHON_VERSION}.${LIBPYTHON_EXT}"
+echo "libpython symlinked at: ${VENV_DIR}/lib/libpython${PYTHON_VERSION}.${LIBPYTHON_EXT}"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PART 2 — Run jextract

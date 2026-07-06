@@ -38,10 +38,10 @@ import java.util.stream.StreamSupport;
  *
  * <p>Each request registered via {@link #addRequest} gets its own
  * {@link SequenceState} with an optional {@link ConversationState}
- * (for tag-based classification and token counting). Only the previous
- * text length is tracked (not the full string) to extract the delta
- * efficiently. This allows multiple concurrent requests to be classified
- * independently.
+ * (for tag-based classification and token counting). Requests are submitted
+ * with {@code RequestOutputKind.DELTA} so each step carries only the new
+ * fragment; the cumulative text is accumulated on this side. This allows
+ * multiple concurrent requests to be classified independently.
  *
  * <h2>With classification</h2>
  * <pre>{@code
@@ -69,7 +69,12 @@ public final class VllmIterator
    */
   private static final class SequenceState {
 
-    int previousTextLength = 0;
+    /**
+     * Cumulative text, accumulated here rather than re-read from Python each
+     * step — appending is amortised O(1), re-marshalling is O(n) per token.
+     */
+    final StringBuilder text = new StringBuilder();
+
     final ConversationState conversationState;
 
     SequenceState(ConversationState conversationState) {
@@ -122,6 +127,9 @@ public final class VllmIterator
     ConversationState conversationState
   ) {
     sequences.put(request.requestId(), new SequenceState(conversationState));
+    // Ask vLLM for deltas: see VllmEngine.useDeltaOutput — without this every
+    // step ships the whole response so far across the FFI boundary.
+    engine.useDeltaOutput(request.samplingParams().get());
     engine.addRequest(request);
     return this;
   }
@@ -168,8 +176,56 @@ public final class VllmIterator
       buffer.clear();
       bufferIndex = 0;
 
-      List<RequestOutput> stepOutputs = engine.step();
-      for (RequestOutput reqOut : stepOutputs) {
+      // One FFI crossing for the whole step: still-generating sequences come
+      // back as flat primitives, and only those that finished are mapped in
+      // full (once per request, so its cost does not matter).
+      var batch = engine.stepPacked();
+
+      for (var fast : batch.streaming()) {
+        SequenceState seq = sequences.computeIfAbsent(fast.requestId(), k ->
+          new SequenceState(null)
+        );
+        if (
+          seq.conversationState != null &&
+          fast.promptTokens() > 0 &&
+          seq.conversationState.inputTokens() == 0
+        ) {
+          seq.conversationState.initialize(fast.promptTokens());
+        }
+
+        String delta = fast.delta() != null ? fast.delta() : "";
+        seq.text.append(delta);
+
+        // Counted even when the delta is empty: a step is a generated token
+        // whether or not it produced printable text. Tokens that complete a
+        // multi-byte character, or that the detokenizer holds back, decode to
+        // "" — skipping them under-reports completion_tokens (and made the
+        // throughput figure divide real time by an undercount).
+        GenerationState state = null;
+        if (seq.conversationState != null) {
+          state = seq.conversationState.evaluate(delta, 1);
+        }
+
+        buffer.add(
+          new VllmOutput(
+            fast.requestId(),
+            // Deliberately not the cumulative text: materialising it here would
+            // copy the whole response on every token, which is quadratic in the
+            // response length — the exact cost that asking vLLM for deltas was
+            // meant to remove. It is populated on the final output; a consumer
+            // that wants it mid-stream joins the deltas, as the tests do.
+            "",
+            delta,
+            false,
+            null,
+            state,
+            List.of(),
+            null
+          )
+        );
+      }
+
+      for (RequestOutput reqOut : batch.finished()) {
         String requestId = reqOut.requestId();
         SequenceState seq = sequences.computeIfAbsent(requestId, k ->
           new SequenceState(null)
@@ -190,16 +246,16 @@ public final class VllmIterator
             ? comp.finishReason().label()
             : null;
 
-          // Compute delta using only the current text and the previous length
-          String fullText = comp.text();
-          String delta = fullText.length() > seq.previousTextLength
-            ? fullText.substring(seq.previousTextLength)
-            : "";
-          seq.previousTextLength = fullText.length();
+          // With RequestOutputKind.DELTA the engine hands us only the new
+          // fragment, so the cumulative text is built up on this side.
+          String delta = comp.text() != null ? comp.text() : "";
+          seq.text.append(delta);
+          String fullText = seq.text.toString();
 
-          // Classify through FSM if configured
+          // Classify through FSM if configured. Counted even for an empty
+          // delta — see the streaming branch above.
           GenerationState state = null;
-          if (seq.conversationState != null && !delta.isEmpty()) {
+          if (seq.conversationState != null) {
             state = seq.conversationState.evaluate(delta, 1);
           }
 

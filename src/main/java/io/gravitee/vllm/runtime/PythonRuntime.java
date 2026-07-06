@@ -154,7 +154,7 @@ public final class PythonRuntime implements AutoCloseable {
     String venv = venvPath.toAbsolutePath().toString();
 
     // Load libpython before touching CPython class
-    PythonLibLoader.ensureLoaded(venvPath.toAbsolutePath().getParent());
+    PythonLibLoader.ensureLoaded(venvPath.toAbsolutePath());
 
     // PYTHONHOME must point to the *base* Python installation (where the stdlib
     // lives), NOT the venv directory.
@@ -407,55 +407,88 @@ public final class PythonRuntime implements AutoCloseable {
   // ── PYTHONHOME resolution ──────────────────────────────────────────────
 
   /**
-   * Resolves the base Python prefix to use as {@code PYTHONHOME}.
+   * Resolves the base Python prefix to use as {@code PYTHONHOME} by parsing
+   * the venv's {@code pyvenv.cfg} ({@code home} points at the base
+   * interpreter's {@code bin} directory).
    *
-   * <p>Reads {@code .python-home} from the project directory, then falls back
-   * to parsing {@code pyvenv.cfg}.
+   * <p>The parent of {@code home} is not always the prefix that holds the
+   * standard library. Homebrew's macOS pythons are framework builds: they
+   * expose {@code <opt>/bin/python3.X} as a shim, so a venv created through it
+   * records {@code home = <opt>/bin}, whose parent has no {@code lib/pythonX.Y}
+   * stdlib at all — the real one lives under
+   * {@code <opt>/Frameworks/Python.framework/Versions/X.Y}. Setting PYTHONHOME
+   * to the shim's parent makes CPython abort during {@code Py_InitializeEx}
+   * with "No module named 'encodings'", long before any of our code runs.
+   *
+   * <p>So the candidate is verified to actually contain the stdlib, and the
+   * framework layout is tried before giving up.
    */
   static String resolvePythonHome(String venvPath) {
     java.nio.file.Path venv = java.nio.file.Path.of(venvPath).toAbsolutePath();
-    java.nio.file.Path projectDir = venv.getParent();
 
-    // 1. Try .python-home
-    if (projectDir != null) {
-      java.nio.file.Path dotFile = projectDir.resolve(".python-home");
-      if (java.nio.file.Files.exists(dotFile)) {
-        try {
-          String home = java.nio.file.Files.readString(dotFile).strip();
-          if (
-            !home.isEmpty() &&
-            java.nio.file.Files.isDirectory(java.nio.file.Path.of(home))
-          ) {
-            return home;
-          }
-        } catch (java.io.IOException ignored) {}
+    java.nio.file.Path prefix = PythonLibLoader.basePrefix(venv);
+    if (prefix != null) {
+      java.nio.file.Path verified = withStdlib(prefix);
+      if (verified != null) {
+        return verified.toString();
       }
-    }
-
-    // 2. Fallback: parse pyvenv.cfg
-    java.nio.file.Path pyvenvCfg = venv.resolve("pyvenv.cfg");
-    if (java.nio.file.Files.exists(pyvenvCfg)) {
-      try {
-        for (String line : java.nio.file.Files.readAllLines(pyvenvCfg)) {
-          if (line.startsWith("home")) {
-            String[] parts = line.split("=", 2);
-            if (parts.length == 2) {
-              java.nio.file.Path home = java.nio.file.Path.of(parts[1].strip());
-              java.nio.file.Path prefix = home.getParent();
-              if (prefix != null && java.nio.file.Files.isDirectory(prefix)) {
-                return prefix.toString();
-              }
-            }
-          }
-        }
-      } catch (java.io.IOException ignored) {}
+      throw new VllmException(
+        "Resolved PYTHONHOME '" +
+          prefix +
+          "' does not contain a Python standard library (no lib/pythonX.Y/encodings). " +
+          "For Homebrew framework builds the stdlib lives under " +
+          "<prefix>/Frameworks/Python.framework/Versions/X.Y — recreate the venv with that " +
+          "interpreter, or set PYTHONHOME explicitly before launching the JVM."
+      );
     }
 
     throw new VllmException(
-      "Cannot determine PYTHONHOME (base Python prefix). " +
-        "Run 'mvn generate-sources -P <profile>' to regenerate .python-home, " +
+      "Cannot determine PYTHONHOME (base Python prefix) from " +
+        venv.resolve("pyvenv.cfg") +
+        ". Ensure the venv exists (scripts/setup-venv.sh) " +
         "or set the PYTHONHOME environment variable before launching the JVM."
     );
+  }
+
+  /**
+   * Returns {@code prefix} if it holds a Python standard library, otherwise the
+   * framework prefix nested under it, otherwise {@code null}.
+   */
+  private static java.nio.file.Path withStdlib(java.nio.file.Path prefix) {
+    if (hasStdlib(prefix)) {
+      return prefix;
+    }
+    // Homebrew framework layout: <prefix>/Frameworks/Python.framework/Versions/X.Y
+    java.nio.file.Path versions = prefix.resolve(
+      "Frameworks/Python.framework/Versions"
+    );
+    if (java.nio.file.Files.isDirectory(versions)) {
+      try (var entries = java.nio.file.Files.list(versions)) {
+        return entries
+          .filter(java.nio.file.Files::isDirectory)
+          .filter(PythonRuntime::hasStdlib)
+          .findFirst()
+          .orElse(null);
+      } catch (java.io.IOException ignored) {}
+    }
+    return null;
+  }
+
+  /** True when {@code prefix/lib/pythonX.Y/encodings} exists. */
+  private static boolean hasStdlib(java.nio.file.Path prefix) {
+    java.nio.file.Path lib = prefix.resolve("lib");
+    if (!java.nio.file.Files.isDirectory(lib)) {
+      return false;
+    }
+    try (var entries = java.nio.file.Files.list(lib)) {
+      return entries.anyMatch(
+        p ->
+          p.getFileName().toString().startsWith("python") &&
+          java.nio.file.Files.isDirectory(p.resolve("encodings"))
+      );
+    } catch (java.io.IOException e) {
+      return false;
+    }
   }
 
   // ── Environment variable helper ────────────────────────────────────────

@@ -126,7 +126,12 @@ commands:
       - run:
           name: Python dependencies
           command: |
-            sudo apt -y install python3.12 python3.12-dev python3.12-venv unzip build-essential
+            # libnuma-dev: the metal and cpu backends build the vLLM core from
+            # source, and cpu_extension.cmake links against libnuma on Linux —
+            # it only sets ENABLE_NUMA OFF for Apple Silicon, so a macOS build
+            # succeeding says nothing about Linux. cmake and ninja come from the
+            # PEP 517 build isolation, so they are not needed here.
+            sudo apt -y install python3.12 python3.12-dev python3.12-venv unzip build-essential libnuma-dev
             curl -LsSf https://astral.sh/uv/install.sh | sh
             echo 'export PATH="$HOME/.local/bin:$PATH"' >> $BASH_ENV
             source $BASH_ENV
@@ -147,6 +152,11 @@ commands:
     steps:
       - run:
           name: Setup venv (<< parameters.backend >> backend)
+          # The metal and cpu backends compile the vLLM core from the release
+          # tarball (no usable wheel exists for either), and ninja can go quiet
+          # for long stretches while building the CPU kernels — well past
+          # CircleCI's 10-minute no-output default.
+          no_output_timeout: 45m
           command: |
             cd $HOME_DIR/vLLM4j
             if [[ << parameters.os >> == "macosx" ]]; then

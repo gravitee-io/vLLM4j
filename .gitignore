@@ -38,7 +38,3 @@ build/
 ### vLLM4j build artifacts ###
 .venv/
 .jextract/
-.python-home
-.libpython-path
-.libpython-dir
-python.properties

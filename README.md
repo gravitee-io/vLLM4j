@@ -53,15 +53,8 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home \
        --reasoning_tags "<think>|</think>"
 
 # Run interactive REPL (Linux / CUDA)
-export LD_PRELOAD=$(python3 -c "
-import sysconfig, os, glob
-libdir = sysconfig.get_config_var('LIBDIR') or ''
-candidates = [f for pat in ['libpython*.so', 'libpython*.so.*']
-              for f in glob.glob(os.path.join(libdir, pat))]
-print(os.path.realpath(candidates[0]) if candidates
-      else os.path.realpath(os.path.join(libdir,
-           sysconfig.get_config_var('LDLIBRARY') or '')))
-")
+# The build symlinks libpython to a stable path inside the venv
+export LD_PRELOAD=$PWD/.venv/lib/libpython3.12.so
 export TOKENIZERS_PARALLELISM=false
 export VLLM_LOGGING_LEVEL=WARNING
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -613,7 +606,7 @@ The following variables are set by the example launch scripts and are worth know
 
 | Variable | Recommended value | Why |
 |---|---|---|
-| `LD_PRELOAD` | `/path/to/libpython3.12.so` | Prevents `undefined symbol: PyTuple_Type` from Python extension modules (e.g. `_ctypes`) that are loaded after the JVM has already resolved libc symbols. Required on Linux. |
+| `LD_PRELOAD` | `/path/to/.venv/lib/libpython3.12.so` (symlink created by the build) | Prevents `undefined symbol: PyTuple_Type` from Python extension modules (e.g. `_ctypes`) that are loaded after the JVM has already resolved libc symbols. Required on Linux. |
 | `VLLM4J_ATTENTION_BACKEND` | `TRITON_ATTN` | vLLM 0.23.0 no longer reads an attention-backend env var, so vLLM4j forwards this one (or the `-Dvllm4j.attentionBackend` system property) to the `attention_backend` engine arg. On GPUs with compute capability < 8.0 (e.g. RTX 2070 = sm75) vLLM auto-selects FlashInfer, whose paged-prefill kernel fails at runtime (`BatchPrefillWithPagedKVCache ... invalid argument`); set `TRITON_ATTN` on those cards. Honored on the CUDA backend only. |
 | `TOKENIZERS_PARALLELISM` | `false` | Suppresses the HuggingFace tokenizers deadlock warning that is emitted when the tokenizer is used in a forked subprocess. |
 | `VLLM_LOGGING_LEVEL` | `WARNING` | vLLM's Python side logs at `INFO` by default, producing verbose scheduler and profiling output on every request. `WARNING` keeps the Java log clean. |
@@ -622,16 +615,10 @@ The following variables are set by the example launch scripts and are worth know
 One-liner to export all of them before launching with `java -jar`:
 
 ```bash
-export LIBPYTHON_PATH=$(python3 -c "
-import sysconfig, os, glob
-libdir = sysconfig.get_config_var('LIBDIR') or ''
-candidates = [f for pat in ['libpython*.so', 'libpython*.so.*']
-              for f in glob.glob(os.path.join(libdir, pat))]
-print(os.path.realpath(candidates[0]) if candidates
-      else os.path.realpath(os.path.join(libdir,
-           sysconfig.get_config_var('LDLIBRARY') or '')))
-")
-export LD_PRELOAD="${LIBPYTHON_PATH}"
+# vLLM4j's build symlinks libpython into the venv (.venv/lib/libpython3.12.so).
+# If you built the venv yourself, point LD_PRELOAD at the base interpreter's
+# libpython instead.
+export LD_PRELOAD=/path/to/.venv/lib/libpython3.12.so
 export TOKENIZERS_PARALLELISM=false
 export VLLM_LOGGING_LEVEL=WARNING
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
