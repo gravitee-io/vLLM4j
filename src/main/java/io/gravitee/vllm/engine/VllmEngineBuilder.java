@@ -100,6 +100,71 @@ public final class VllmEngineBuilder {
   }
 
   /**
+   * Loads an already-downloaded model from disk instead of resolving a
+   * HuggingFace repo id.
+   *
+   * <p>vLLM takes the same {@code model} argument for both, so this is
+   * {@link #model(String)} with the path validated up front. That validation is
+   * the point: HuggingFace treats anything that is not an existing local path
+   * as a repo id, so a typo'd or relative path does not fail as "no such
+   * directory" — it fails much later, and from the wrong layer, as
+   * {@code HFValidationError: Repo id must be in the form 'repo_name' or
+   * 'namespace/repo_name'}. Worse, a path that exists but is incomplete sends
+   * vLLM to the network for the missing files.
+   *
+   * <p>Two shapes are accepted:
+   * <ul>
+   *   <li>A <strong>directory</strong> in HuggingFace format — the usual case.
+   *       Must contain {@code config.json}. A snapshot directory from the HF
+   *       cache ({@code ~/.cache/huggingface/hub/models--org--name/snapshots/<rev>})
+   *       works as-is, symlinked blobs and all. The tokenizer is read from the
+   *       same directory unless {@link #tokenizer(String)} says otherwise.</li>
+   *   <li>A <strong>regular file</strong>, for single-file formats such as GGUF.
+   *       Passed through unvalidated beyond existence — these carry no
+   *       {@code config.json}, and vLLM generally needs
+   *       {@link #tokenizer(String)} pointed at a repo or directory alongside
+   *       it.</li>
+   * </ul>
+   *
+   * <p>Nothing is downloaded for a complete local directory, so this is the
+   * path to use in an air-gapped deployment or when the model is baked into an
+   * image or mounted volume.
+   *
+   * @param modelPath directory (or single-file model) to load from
+   * @return this
+   * @throws VllmException if the path does not exist, or is a directory without
+   *                       a {@code config.json}
+   */
+  public VllmEngineBuilder modelPath(Path modelPath) {
+    if (modelPath == null) {
+      throw new VllmException("modelPath must not be null");
+    }
+    Path resolved = modelPath.toAbsolutePath().normalize();
+
+    if (Files.isDirectory(resolved)) {
+      if (!Files.isRegularFile(resolved.resolve("config.json"))) {
+        throw new VllmException(
+          "No config.json in '" +
+            resolved +
+            "' — not a HuggingFace model directory. For a HF cache entry point at the " +
+            "snapshot directory (…/models--org--name/snapshots/<revision>), not at the " +
+            "repo root."
+        );
+      }
+    } else if (!Files.isRegularFile(resolved)) {
+      throw new VllmException(
+        "Model path '" +
+          resolved +
+          "' does not exist. Pass a HuggingFace repo id to model(String) instead if you " +
+          "meant to download it."
+      );
+    }
+
+    this.model = resolved.toString();
+    return this;
+  }
+
+  /**
    * Sets an explicit tokenizer id, overriding the model's built-in tokenizer.
    * Recommended for GGUF models where the tokenizer conversion is slow and
    * unreliable — use the base model's tokenizer instead.

@@ -49,15 +49,26 @@ public final class StateEvaluation {
   private final StringBuilder buffer = new StringBuilder();
 
   /**
+   * Longest configured tag. Bounds how much history a tag could still span,
+   * and so how much of the buffer is worth keeping.
+   */
+  private int longestTag;
+
+  /**
    * Initializes the FSM with the given tag configurations.
    * Must be called before {@link #evaluate}.
    */
   public void initialize(List<TagBounds> tags) {
     tagsByState = new EnumMap<>(GenerationState.class);
     occurred = new EnumMap<>(GenerationState.class);
+    longestTag = 0;
     for (TagBounds tb : tags) {
       tagsByState.put(tb.state(), tb);
       occurred.put(tb.state(), false);
+      longestTag = Math.max(
+        longestTag,
+        Math.max(length(tb.openTag()), length(tb.closeTag()))
+      );
     }
     buffer.setLength(0);
   }
@@ -81,11 +92,39 @@ public final class StateEvaluation {
 
     buffer.append(delta);
 
-    return switch (currentState) {
+    GenerationState next = switch (currentState) {
       case ANSWER -> detectOpenTag();
       case REASONING, TOOLS -> detectCloseTag(currentState);
       case null -> GenerationState.ANSWER;
     };
+
+    trimBuffer();
+    return next;
+  }
+
+  /**
+   * Keeps the buffer bounded to the longest tag minus one character.
+   *
+   * <p>Without this the buffer grows for the whole generation — it is only
+   * cleared on a tag transition, and a plain answer contains none — while every
+   * delta calls {@code toString()} and {@code lastIndexOf} over all of it. That
+   * is quadratic in the response length, and on a fast model it costs more than
+   * decoding the token does.
+   *
+   * <p>Discarding the older text is safe because the buffer is scanned after
+   * <em>every</em> delta: a tag is detected in the step its final character
+   * arrives, so the only history that can still matter is a partial tag, which
+   * is at most {@code longestTag - 1} characters.
+   */
+  private void trimBuffer() {
+    int keep = longestTag > 0 ? longestTag - 1 : 0;
+    if (buffer.length() > keep) {
+      buffer.delete(0, buffer.length() - keep);
+    }
+  }
+
+  private static int length(String tag) {
+    return tag == null ? 0 : tag.length();
   }
 
   /**

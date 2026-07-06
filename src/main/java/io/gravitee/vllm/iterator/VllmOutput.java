@@ -25,7 +25,10 @@ import java.util.Map;
  * and semantic classification.
  *
  * @param requestId    the request that produced this output
- * @param text         the cumulative generated text so far for this completion
+ * @param text         the cumulative generated text, populated on the FINAL output
+ *                     of a request and empty while streaming — accumulating it per
+ *                     token is quadratic in the response length. Join {@link #delta}
+ *                     values for the text so far.
  * @param delta        the new text fragment since the last output for this request
  * @param finished     whether generation is complete for this request
  * @param finishReason why generation stopped (e.g. {@code "stop"}, {@code "length"}),

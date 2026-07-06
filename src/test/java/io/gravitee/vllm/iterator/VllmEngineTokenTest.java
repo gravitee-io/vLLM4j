@@ -51,6 +51,25 @@ class VllmEngineTokenTest {
   }
 
   @Test
+  void engine_returns_the_resolved_context_window() {
+    int ctx = engine.maxModelLen();
+
+    // SharedEngine asks for 4096; the point is that the *resolved* value comes
+    // back, since callers budget prompts against it.
+    assertThat(ctx).isEqualTo(4096);
+  }
+
+  @Test
+  void engine_enumerates_every_special_token() {
+    var tokens = engine.allSpecialTokens();
+
+    // Not just BOS/EOS — the whole special-token map, which is what makes
+    // neutralising them in untrusted text possible.
+    assertThat(tokens).contains("<|im_start|>", "<|im_end|>", "<|endoftext|>");
+    assertThat(tokens).allSatisfy(t -> assertThat(t).isNotBlank());
+  }
+
+  @Test
   void engine_returns_eos_token() {
     String eos = engine.getEosToken();
 

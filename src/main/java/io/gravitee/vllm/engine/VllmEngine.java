@@ -412,6 +412,192 @@ public final class VllmEngine implements AutoCloseable {
   }
 
   /**
+   * Switches a request's sampling params to per-step deltas.
+   *
+   * <p>vLLM defaults to {@code RequestOutputKind.CUMULATIVE}: every
+   * {@code step()} returns the <em>entire</em> text generated so far. Marshalling
+   * that across the FFI boundary once per token makes streaming quadratic in the
+   * response length — decoding N characters on token N — which dominates the
+   * decode loop long before the model does. {@code DELTA} returns only the new
+   * fragment, so the per-token cost stops depending on how much has already been
+   * generated.
+   *
+   * <p>Applied to the built {@code SamplingParams} object rather than exposed as
+   * a builder option: it is not a sampling choice, it is how the streaming
+   * iterator has to consume results.
+   *
+   * @param samplingParams the built params object to mutate
+   */
+  public void useDeltaOutput(MemorySegment samplingParams) {
+    checkNotClosed();
+    try (var gil = GIL.acquire()) {
+      MemorySegment kindClass = PythonCall.importClass(
+        arena,
+        "vllm.sampling_params",
+        "RequestOutputKind"
+      );
+      MemorySegment delta = PythonTypes.getAttr(arena, kindClass, "DELTA");
+      PythonErrors.checkPythonError("RequestOutputKind.DELTA");
+
+      MemorySegment name = arena.allocateFrom("output_kind");
+      CPythonBinding.PyObject_SetAttrString(samplingParams, name, delta);
+      PythonErrors.checkPythonError("SamplingParams.output_kind = DELTA");
+
+      PythonTypes.decref(delta);
+      PythonTypes.decref(kindClass);
+    }
+  }
+
+  /**
+   * One streaming token's worth of output, flattened to primitives.
+   *
+   * @param requestId    the request this belongs to
+   * @param delta        the new text fragment
+   * @param promptTokens prompt length, for usage accounting
+   */
+  public record FastOutput(String requestId, String delta, int promptTokens) {}
+
+  /**
+   * Result of a packed step: still-generating sequences in compact form, plus
+   * any that completed, mapped in full.
+   *
+   * @param streaming compact per-token updates
+   * @param finished  fully-mapped outputs for sequences that completed
+   */
+  public record StepBatch(
+    List<FastOutput> streaming,
+    List<RequestOutput> finished
+  ) {}
+
+  /** Python source of the packing helper. Defined once, called once per step. */
+  private static final String PACK_SOURCE = """
+    def __vllm4j_pack(engine):
+        fast = []
+        final = []
+        for o in engine.step():
+            if o.finished:
+                # Rare (once per request) — hand it back whole so the Java side
+                # can map every field, including token ids and logprobs.
+                final.append(o)
+            else:
+                c = o.outputs[0] if o.outputs else None
+                fast.append((
+                    o.request_id,
+                    c.text if c is not None else '',
+                    len(o.prompt_token_ids) if o.prompt_token_ids else 0,
+                ))
+        return (fast, final)
+    """;
+
+  /** Cached {@code __vllm4j_pack} callable. */
+  private MemorySegment packFn;
+
+  /**
+   * Steps the engine and returns the results in as few FFI crossings as
+   * possible.
+   *
+   * <p>{@link #step()} reads each field of each output with its own attribute
+   * lookup — request id, finished flag, completions, token ids, prompt token
+   * ids, cached tokens, and the whole metrics object — roughly twenty crossings
+   * per token, every one of them taking the GIL and touching refcounts. At the
+   * speeds a small model decodes at, that dominates the loop.
+   *
+   * <p>This pushes the field access into Python, where it is a handful of
+   * bytecodes, and brings back one tuple of primitives per sequence. The
+   * streaming path then costs a single call plus a few borrowed-reference tuple
+   * reads. Notably it also stops mapping {@code metrics} on every token, which
+   * {@link #step()} does only to recover the prompt length.
+   *
+   * <p>Sequences that finish are returned whole and mapped by the normal path,
+   * so nothing is lost — that happens once per request, not once per token.
+   */
+  public StepBatch stepPacked() {
+    checkNotClosed();
+    try (var gil = GIL.acquire()) {
+      MemorySegment result = PythonCall.callOneArg(ensurePackFn(), engine);
+      PythonErrors.checkPythonError("__vllm4j_pack(engine)");
+
+      MemorySegment fastList = CPythonBinding.PyTuple_GetItem(result, 0); // borrowed
+      MemorySegment finalList = CPythonBinding.PyTuple_GetItem(result, 1); // borrowed
+
+      long fastSize = CPythonBinding.PyList_Size(fastList);
+      List<FastOutput> streaming = new ArrayList<>((int) Math.max(fastSize, 0));
+      for (long i = 0; i < fastSize; i++) {
+        MemorySegment row = CPythonBinding.PyList_GetItem(fastList, i); // borrowed
+        streaming.add(
+          new FastOutput(
+            PythonTypes.pyUnicodeToString(
+              CPythonBinding.PyTuple_GetItem(row, 0)
+            ),
+            PythonTypes.pyUnicodeToString(
+              CPythonBinding.PyTuple_GetItem(row, 1)
+            ),
+            (int) CPythonBinding.PyLong_AsLong(
+              CPythonBinding.PyTuple_GetItem(row, 2)
+            )
+          )
+        );
+      }
+
+      long finalSize = CPythonBinding.PyList_Size(finalList);
+      List<RequestOutput> finished = new ArrayList<>(
+        (int) Math.max(finalSize, 0)
+      );
+      for (long i = 0; i < finalSize; i++) {
+        finished.add(
+          mapRequestOutput(CPythonBinding.PyList_GetItem(finalList, i))
+        );
+      }
+
+      PythonTypes.decref(result);
+      return new StepBatch(streaming, finished);
+    }
+  }
+
+  /**
+   * Defines the packing helper on first use.
+   *
+   * <p>Uses {@code builtins.exec} into a private namespace dict rather than a
+   * shipped module: the helper is five lines and tying it to a file on
+   * {@code sys.path} would make the jar's layout part of the runtime contract.
+   */
+  private MemorySegment ensurePackFn() {
+    if (packFn != null) {
+      return packFn;
+    }
+    MemorySegment builtins = PythonCall.importClass(arena, "builtins", "exec");
+    MemorySegment namespace = CPythonBinding.PyDict_New();
+    MemorySegment source = PythonTypes.pyStr(arena, PACK_SOURCE);
+
+    MemorySegment args = PythonCall.makeTuple(source, namespace);
+    MemorySegment ignored = PythonCall.pyObjectCall(
+      builtins,
+      args,
+      MemorySegment.NULL
+    );
+    PythonErrors.checkPythonError("exec(__vllm4j_pack)");
+    PythonTypes.decref(ignored);
+    PythonTypes.decref(args);
+    PythonTypes.decref(source);
+    PythonTypes.decref(builtins);
+
+    MemorySegment get = PythonTypes.pyStr(arena, "get");
+    MemorySegment key = PythonTypes.pyStr(arena, "__vllm4j_pack");
+    packFn = PythonCall.callMethodObjArgs(namespace, get, key);
+    PythonErrors.checkPythonError("namespace.get(__vllm4j_pack)");
+    PythonTypes.decref(key);
+    PythonTypes.decref(get);
+    PythonTypes.decref(namespace);
+
+    if (PythonTypes.isNull(packFn) || PythonTypes.isNone(packFn)) {
+      throw new VllmException(
+        "Could not define the vLLM4j step packing helper"
+      );
+    }
+    return packFn;
+  }
+
+  /**
    * Wraps {@code engine.has_unfinished_requests()}.
    */
   public boolean hasUnfinishedRequests() {
@@ -559,6 +745,91 @@ public final class VllmEngine implements AutoCloseable {
    */
   public String getEosToken() {
     return getSpecialToken("eos_token");
+  }
+
+  /**
+   * Returns the model's maximum sequence length ({@code model_config.max_model_len}).
+   *
+   * <p>This is what vLLM actually resolved, which is not necessarily what was
+   * requested: an unset {@code maxModelLen} leaves vLLM to derive it from the
+   * checkpoint's {@code max_position_embeddings}. Callers budgeting a prompt
+   * need the resolved value.
+   *
+   * @return the context window in tokens, or 0 if it cannot be read
+   */
+  public int maxModelLen() {
+    checkNotClosed();
+    try (var gil = GIL.acquire()) {
+      MemorySegment modelConfig = PythonTypes.getAttr(
+        arena,
+        engine,
+        "model_config"
+      );
+      if (PythonTypes.isNull(modelConfig)) {
+        CPythonBinding.PyErr_Clear();
+        return 0;
+      }
+      MemorySegment pyLen = PythonTypes.getAttr(
+        arena,
+        modelConfig,
+        "max_model_len"
+      );
+      int value = 0;
+      if (!PythonTypes.isNone(pyLen) && !PythonTypes.isNull(pyLen)) {
+        value = (int) CPythonBinding.PyLong_AsLong(pyLen);
+      }
+      PythonTypes.decref(pyLen);
+      PythonTypes.decref(modelConfig);
+      CPythonBinding.PyErr_Clear();
+      return value;
+    }
+  }
+
+  /**
+   * Returns every special token the tokenizer declares, e.g.
+   * {@code <|im_start|>}, {@code <|endoftext|>}, {@code <|image_pad|>}.
+   *
+   * <p>Reads {@code tokenizer.all_special_tokens}, which covers the whole
+   * special-token map rather than just BOS/EOS. Callers use it to neutralise
+   * these markers when they appear in untrusted text, so that a prompt cannot
+   * forge turn boundaries.
+   *
+   * @return the special tokens, or an empty list if the tokenizer exposes none
+   */
+  public List<String> allSpecialTokens() {
+    checkNotClosed();
+    try (var gil = GIL.acquire()) {
+      MemorySegment tokenizer = PythonTypes.getAttr(arena, engine, "tokenizer");
+      if (PythonTypes.isNull(tokenizer)) {
+        CPythonBinding.PyErr_Clear();
+        return List.of();
+      }
+      MemorySegment pyTokens = PythonTypes.getAttr(
+        arena,
+        tokenizer,
+        "all_special_tokens"
+      );
+      if (PythonTypes.isNone(pyTokens) || PythonTypes.isNull(pyTokens)) {
+        PythonTypes.decref(pyTokens);
+        PythonTypes.decref(tokenizer);
+        CPythonBinding.PyErr_Clear();
+        return List.of();
+      }
+
+      long size = CPythonBinding.PyList_Size(pyTokens);
+      List<String> result = new ArrayList<>((int) Math.max(size, 0));
+      for (long i = 0; i < size; i++) {
+        MemorySegment item = CPythonBinding.PyList_GetItem(pyTokens, i); // borrowed
+        String token = PythonTypes.pyUnicodeToString(item);
+        if (token != null && !token.isEmpty()) {
+          result.add(token);
+        }
+      }
+      PythonTypes.decref(pyTokens);
+      PythonTypes.decref(tokenizer);
+      CPythonBinding.PyErr_Clear();
+      return result;
+    }
   }
 
   private String getSpecialToken(String attrName) {
