@@ -77,8 +77,16 @@ public final class VllmIterator
 
     final ConversationState conversationState;
 
-    SequenceState(ConversationState conversationState) {
+    /**
+     * The rendered prompt, kept to seed the initial generation state: a chat
+     * template may end inside a span it opened itself (e.g. with
+     * {@code <think>}), which the model never re-emits.
+     */
+    final String prompt;
+
+    SequenceState(ConversationState conversationState, String prompt) {
       this.conversationState = conversationState;
+      this.prompt = prompt;
     }
   }
 
@@ -126,7 +134,10 @@ public final class VllmIterator
     VllmRequest request,
     ConversationState conversationState
   ) {
-    sequences.put(request.requestId(), new SequenceState(conversationState));
+    sequences.put(
+      request.requestId(),
+      new SequenceState(conversationState, request.prompt())
+    );
     // Ask vLLM for deltas: see VllmEngine.useDeltaOutput — without this every
     // step ships the whole response so far across the FFI boundary.
     engine.useDeltaOutput(request.samplingParams().get());
@@ -183,28 +194,33 @@ public final class VllmIterator
 
       for (var fast : batch.streaming()) {
         SequenceState seq = sequences.computeIfAbsent(fast.requestId(), k ->
-          new SequenceState(null)
+          new SequenceState(null, null)
         );
         if (
           seq.conversationState != null &&
           fast.promptTokens() > 0 &&
           seq.conversationState.inputTokens() == 0
         ) {
-          seq.conversationState.initialize(fast.promptTokens());
+          seq.conversationState.initialize(fast.promptTokens(), seq.prompt);
         }
-
-        String delta = fast.delta() != null ? fast.delta() : "";
-        seq.text.append(delta);
 
         // Counted even when the delta is empty: a step is a generated token
         // whether or not it produced printable text. Tokens that complete a
         // multi-byte character, or that the detokenizer holds back, decode to
         // "" — skipping them under-reports completion_tokens (and made the
         // throughput figure divide real time by an undercount).
+        String delta = fast.delta() != null ? fast.delta() : "";
         GenerationState state = null;
         if (seq.conversationState != null) {
-          state = seq.conversationState.evaluate(delta, 1);
+          // The FSM decides what is emitted, not just how it is labelled: tag
+          // markers are syntax and never reach the client, and a delta holding
+          // only part of a marker emits nothing until the marker is confirmed
+          // or refuted.
+          var emission = seq.conversationState.evaluate(delta, 1);
+          state = emission.state();
+          delta = emission.emit();
         }
+        seq.text.append(delta);
 
         buffer.add(
           new VllmOutput(
@@ -228,7 +244,7 @@ public final class VllmIterator
       for (RequestOutput reqOut : batch.finished()) {
         String requestId = reqOut.requestId();
         SequenceState seq = sequences.computeIfAbsent(requestId, k ->
-          new SequenceState(null)
+          new SequenceState(null, null)
         );
         // Unknown request — create a bare tracker
 
@@ -238,7 +254,10 @@ public final class VllmIterator
           reqOut.numPromptTokens() > 0 &&
           seq.conversationState.inputTokens() == 0
         ) {
-          seq.conversationState.initialize(reqOut.numPromptTokens());
+          seq.conversationState.initialize(
+            reqOut.numPromptTokens(),
+            seq.prompt
+          );
         }
 
         for (CompletionOutput comp : reqOut.outputs()) {
@@ -249,15 +268,25 @@ public final class VllmIterator
           // With RequestOutputKind.DELTA the engine hands us only the new
           // fragment, so the cumulative text is built up on this side.
           String delta = comp.text() != null ? comp.text() : "";
-          seq.text.append(delta);
-          String fullText = seq.text.toString();
 
           // Classify through FSM if configured. Counted even for an empty
           // delta — see the streaming branch above.
           GenerationState state = null;
           if (seq.conversationState != null) {
-            state = seq.conversationState.evaluate(delta, 1);
+            var emission = seq.conversationState.evaluate(delta, 1);
+            state = emission.state();
+            delta = emission.emit();
+            if (comp.finished()) {
+              // Generation ended: anything still buffered behind an
+              // unconfirmed marker belongs to the current channel and would
+              // otherwise be dropped along with its tokens.
+              var flushed = seq.conversationState.flush();
+              state = flushed.emitTokens() > 0 ? flushed.state() : state;
+              delta = delta + flushed.emit();
+            }
           }
+          seq.text.append(delta);
+          String fullText = seq.text.toString();
 
           // Set finish reason on conversation state
           if (

@@ -21,6 +21,15 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * The tag FSM, which decides both what channel text belongs to and what text
+ * the client is allowed to see.
+ *
+ * <p>Emission is the half that is easy to forget: markers are syntax, so they
+ * must never reach the client, and a marker split across deltas must not leak
+ * its fragments while it is still unconfirmed. Both are asserted here rather
+ * than only the resulting state.
+ */
 class StateEvaluationTest {
 
   private StateEvaluation fsm;
@@ -31,72 +40,168 @@ class StateEvaluationTest {
   }
 
   @Test
-  void uninitializedFsm_shouldReturnCurrentState() {
+  void uninitializedFsm_shouldEmitTextUnchanged() {
     assertThat(fsm.isInitialized()).isFalse();
-    assertThat(fsm.evaluate(GenerationState.ANSWER, "hello")).isEqualTo(
-      GenerationState.ANSWER
-    );
+
+    var emission = fsm.evaluate(GenerationState.ANSWER, "hello", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emit()).isEqualTo("hello");
+    assertThat(emission.emitTokens()).isEqualTo(1);
   }
 
   @Test
-  void nullDelta_shouldReturnCurrentState() {
+  void nullDelta_shouldStillCountItsToken() {
     initWithReasoningTags();
-    assertThat(fsm.evaluate(GenerationState.ANSWER, null)).isEqualTo(
-      GenerationState.ANSWER
-    );
+
+    // A token that decodes to nothing (half a multi-byte character) is still a
+    // generated token; dropping it under-reports completion_tokens.
+    var emission = fsm.evaluate(GenerationState.ANSWER, null, 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emit()).isEmpty();
+    assertThat(emission.emitTokens()).isEqualTo(1);
   }
 
   @Test
-  void emptyDelta_shouldReturnCurrentState() {
+  void emptyDelta_shouldStillCountItsToken() {
     initWithReasoningTags();
-    assertThat(fsm.evaluate(GenerationState.ANSWER, "")).isEqualTo(
-      GenerationState.ANSWER
-    );
+
+    var emission = fsm.evaluate(GenerationState.ANSWER, "", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emitTokens()).isEqualTo(1);
   }
 
   // ── Reasoning tag transitions ──────────────────────────────────────
 
   @Test
-  void shouldTransitionToReasoningOnOpenTag() {
+  void shouldTransitionToReasoningOnOpenTag_andSuppressTheTag() {
     initWithReasoningTags();
 
-    var state = fsm.evaluate(GenerationState.ANSWER, "<think>");
-    assertThat(state).isEqualTo(GenerationState.REASONING);
+    var emission = fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.REASONING);
+    // The tag is syntax: the client must never see it in its content stream.
+    assertThat(emission.emit()).isEmpty();
+    // ...but the token it cost is billed, to the channel it opened.
+    assertThat(emission.emitTokens()).isEqualTo(1);
   }
 
   @Test
   void shouldTransitionBackToAnswerOnCloseTag() {
     initWithReasoningTags();
 
-    fsm.evaluate(GenerationState.ANSWER, "<think>");
-    var state = fsm.evaluate(GenerationState.REASONING, "</think>");
-    assertThat(state).isEqualTo(GenerationState.ANSWER);
+    fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+    var emission = fsm.evaluate(GenerationState.REASONING, "</think>", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emit()).isEmpty();
   }
 
   @Test
-  void shouldDetectTagsSplitAcrossDeltas() {
+  void aDeltaSpanningTheCloseTag_shouldEmitOnlyTheRemainder() {
     initWithReasoningTags();
 
-    // Tag arrives across two deltas: "<thi" + "nk>"
-    var state1 = fsm.evaluate(GenerationState.ANSWER, "Hello <thi");
-    assertThat(state1).isEqualTo(GenerationState.ANSWER); // not yet
+    fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+    var emission = fsm.evaluate(
+      GenerationState.REASONING,
+      "</think>The answer",
+      1
+    );
 
-    var state2 = fsm.evaluate(GenerationState.ANSWER, "nk>");
-    assertThat(state2).isEqualTo(GenerationState.REASONING); // buffer accumulated
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emit()).isEqualTo("The answer");
+  }
+
+  // ── Split markers: the leak this FSM exists to prevent ─────────────
+
+  @Test
+  void aTagSplitAcrossDeltas_shouldNotLeakItsFragments() {
+    initWithReasoningTags();
+
+    // "<thi" is a strict prefix of "<think>": buffered, nothing emitted, and
+    // crucially not billed yet either.
+    var first = fsm.evaluate(GenerationState.ANSWER, "<thi", 1);
+    assertThat(first.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(first.emit()).isEmpty();
+    assertThat(first.emitTokens()).isZero();
+    assertThat(fsm.hasPending()).isTrue();
+
+    var second = fsm.evaluate(GenerationState.ANSWER, "nk>", 1);
+    assertThat(second.state()).isEqualTo(GenerationState.REASONING);
+    assertThat(second.emit()).isEmpty();
+    // Both buffered tokens resolve here, so nothing is lost.
+    assertThat(second.emitTokens()).isEqualTo(2);
+    assertThat(fsm.hasPending()).isFalse();
+  }
+
+  @Test
+  void textThatMerelyLooksLikeATag_shouldBeEmittedWhenRefuted() {
+    initWithReasoningTags();
+
+    fsm.evaluate(GenerationState.ANSWER, "<thi", 1);
+    var emission = fsm.evaluate(GenerationState.ANSWER, "s is prose", 1);
+
+    // Refutation: buffer flushed to the current channel, nothing swallowed.
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emit()).isEqualTo("<this is prose");
+    assertThat(emission.emitTokens()).isEqualTo(2);
+  }
+
+  @Test
+  void aRefutingDeltaThatStartsANewTag_shouldBeRescanned() {
+    initWithReasoningTags();
+
+    fsm.evaluate(GenerationState.ANSWER, "<thi", 1);
+    // "x" refutes "<thi"; the rest of this delta opens a fresh candidate.
+    var emission = fsm.evaluate(GenerationState.ANSWER, "<th", 1);
+
+    assertThat(emission.emit()).isEqualTo("<thi");
+    assertThat(emission.emitTokens()).isEqualTo(1);
+    // The refuting delta itself is now buffered as a candidate prefix.
+    assertThat(fsm.hasPending()).isTrue();
+  }
+
+  @Test
+  void flushPending_shouldReleaseAnUnconfirmedTagAtEndOfGeneration() {
+    initWithReasoningTags();
+
+    fsm.evaluate(GenerationState.ANSWER, "<thi", 1);
+    var flushed = fsm.flushPending(GenerationState.ANSWER);
+
+    // Generation stopped mid-marker; without the flush this text and its token
+    // would simply vanish.
+    assertThat(flushed.emit()).isEqualTo("<thi");
+    assertThat(flushed.emitTokens()).isEqualTo(1);
+    assertThat(fsm.hasPending()).isFalse();
+  }
+
+  @Test
+  void flushPending_shouldBeANoopWhenNothingIsBuffered() {
+    initWithReasoningTags();
+
+    var flushed = fsm.flushPending(GenerationState.REASONING);
+
+    assertThat(flushed.state()).isEqualTo(GenerationState.REASONING);
+    assertThat(flushed.emit()).isEmpty();
+    assertThat(flushed.emitTokens()).isZero();
   }
 
   @Test
   void reasoningShouldNotReenter() {
     initWithReasoningTags();
 
-    // First reasoning block
-    fsm.evaluate(GenerationState.ANSWER, "<think>");
-    fsm.evaluate(GenerationState.REASONING, "thinking...");
-    fsm.evaluate(GenerationState.REASONING, "</think>");
+    fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+    fsm.evaluate(GenerationState.REASONING, "thinking...", 1);
+    fsm.evaluate(GenerationState.REASONING, "</think>", 1);
 
-    // Second <think> should NOT re-enter reasoning
-    var state = fsm.evaluate(GenerationState.ANSWER, "<think>");
-    assertThat(state).isEqualTo(GenerationState.ANSWER);
+    // A second <think> is no longer a marker, so it is plain content — and is
+    // emitted rather than silently swallowed.
+    var emission = fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emit()).isEqualTo("<think>");
   }
 
   // ── Tools tag transitions ──────────────────────────────────────────
@@ -105,22 +210,63 @@ class StateEvaluationTest {
   void shouldTransitionToToolsOnOpenTag() {
     initWithToolTags();
 
-    var state = fsm.evaluate(GenerationState.ANSWER, "<tool_call>");
-    assertThat(state).isEqualTo(GenerationState.TOOLS);
+    var emission = fsm.evaluate(GenerationState.ANSWER, "<tool_call>", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.TOOLS);
+    assertThat(emission.emit()).isEmpty();
   }
 
   @Test
   void toolsShouldAllowReentry() {
     initWithToolTags();
 
-    // First tool call
-    fsm.evaluate(GenerationState.ANSWER, "<tool_call>");
-    fsm.evaluate(GenerationState.TOOLS, "{\"name\":\"foo\"}");
-    fsm.evaluate(GenerationState.TOOLS, "</tool_call>");
+    fsm.evaluate(GenerationState.ANSWER, "<tool_call>", 1);
+    fsm.evaluate(GenerationState.TOOLS, "{\"name\":\"foo\"}", 1);
+    fsm.evaluate(GenerationState.TOOLS, "</tool_call>", 1);
 
-    // Second tool call should work
-    var state = fsm.evaluate(GenerationState.ANSWER, "<tool_call>");
-    assertThat(state).isEqualTo(GenerationState.TOOLS);
+    var emission = fsm.evaluate(GenerationState.ANSWER, "<tool_call>", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.TOOLS);
+  }
+
+  @Test
+  void aChannelWithSeveralOpeningMarkers_shouldEnterOnAnyOfThem() {
+    // Harmony opens its tool channel as both commentary and analysis;
+    // configuring only one leaks the other into the answer as raw text.
+    fsm.initialize(
+      List.of(
+        new TagBounds(
+          GenerationState.TOOLS,
+          List.of("<tool_call>", "<function_call>"),
+          "</tool_call>"
+        )
+      )
+    );
+
+    var emission = fsm.evaluate(GenerationState.ANSWER, "<function_call>", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.TOOLS);
+    assertThat(emission.emit()).isEmpty();
+  }
+
+  @Test
+  void whenMarkersSharePrefixes_theLongestShouldWin() {
+    // Both markers match "<tool_call_json>"; taking the shorter one would emit
+    // "_json>" as content.
+    fsm.initialize(
+      List.of(
+        new TagBounds(
+          GenerationState.TOOLS,
+          List.of("<tool_call>", "<tool_call_json>"),
+          "</tool_call>"
+        )
+      )
+    );
+
+    var emission = fsm.evaluate(GenerationState.ANSWER, "<tool_call_json>", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.TOOLS);
+    assertThat(emission.emit()).isEmpty();
   }
 
   // ── Both reasoning + tools ─────────────────────────────────────────
@@ -129,22 +275,66 @@ class StateEvaluationTest {
   void shouldHandleBothReasoningAndTools() {
     initWithBothTags();
 
-    // Reasoning phase
-    var s1 = fsm.evaluate(GenerationState.ANSWER, "<think>");
-    assertThat(s1).isEqualTo(GenerationState.REASONING);
+    assertThat(
+      fsm.evaluate(GenerationState.ANSWER, "<think>", 1).state()
+    ).isEqualTo(GenerationState.REASONING);
+    assertThat(
+      fsm.evaluate(GenerationState.REASONING, "let me think", 1).state()
+    ).isEqualTo(GenerationState.REASONING);
+    assertThat(
+      fsm.evaluate(GenerationState.REASONING, "</think>", 1).state()
+    ).isEqualTo(GenerationState.ANSWER);
+    assertThat(
+      fsm.evaluate(GenerationState.ANSWER, "<tool_call>", 1).state()
+    ).isEqualTo(GenerationState.TOOLS);
+    assertThat(
+      fsm.evaluate(GenerationState.TOOLS, "</tool_call>", 1).state()
+    ).isEqualTo(GenerationState.ANSWER);
+  }
 
-    var s2 = fsm.evaluate(GenerationState.REASONING, "let me think");
-    assertThat(s2).isEqualTo(GenerationState.REASONING);
+  @Test
+  void channelsShouldChainRatherThanNest() {
+    initWithBothTags();
 
-    var s3 = fsm.evaluate(GenerationState.REASONING, "</think>");
-    assertThat(s3).isEqualTo(GenerationState.ANSWER);
+    fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+    // A tool call opening straight out of the reasoning span closes it
+    // implicitly — models do not always emit the close tag first.
+    var emission = fsm.evaluate(GenerationState.REASONING, "<tool_call>", 1);
 
-    // Tool phase
-    var s4 = fsm.evaluate(GenerationState.ANSWER, "<tool_call>");
-    assertThat(s4).isEqualTo(GenerationState.TOOLS);
+    assertThat(emission.state()).isEqualTo(GenerationState.TOOLS);
+    assertThat(emission.emit()).isEmpty();
+  }
 
-    var s5 = fsm.evaluate(GenerationState.TOOLS, "</tool_call>");
-    assertThat(s5).isEqualTo(GenerationState.ANSWER);
+  // ── Prompt-seeded initial state ────────────────────────────────────
+
+  @Test
+  void aPromptEndingInsideAnOpenSpan_shouldSeedThatState() {
+    initWithReasoningTags();
+
+    // Templates that pre-fill <think> mean the model never emits it, so
+    // without the seed the whole reasoning block reads as answer.
+    assertThat(fsm.initialState("<|im_start|>assistant\n<think>\n")).isEqualTo(
+      GenerationState.REASONING
+    );
+  }
+
+  @Test
+  void aPromptWhoseSpanIsClosed_shouldStartInAnswer() {
+    initWithReasoningTags();
+
+    assertThat(fsm.initialState("<think>earlier turn</think>done\n")).isEqualTo(
+      GenerationState.ANSWER
+    );
+  }
+
+  @Test
+  void anAbsentOrUnknownPrompt_shouldStartInAnswer() {
+    initWithReasoningTags();
+
+    assertThat(fsm.initialState(null)).isEqualTo(GenerationState.ANSWER);
+    assertThat(fsm.initialState("just a question")).isEqualTo(
+      GenerationState.ANSWER
+    );
   }
 
   // ── Reset ──────────────────────────────────────────────────────────
@@ -153,25 +343,37 @@ class StateEvaluationTest {
   void reset_shouldAllowReasoningAgain() {
     initWithReasoningTags();
 
-    // Use reasoning
-    fsm.evaluate(GenerationState.ANSWER, "<think>");
-    fsm.evaluate(GenerationState.REASONING, "</think>");
+    fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+    fsm.evaluate(GenerationState.REASONING, "</think>", 1);
 
-    // After reset, reasoning should work again
     fsm.reset();
-    var state = fsm.evaluate(GenerationState.ANSWER, "<think>");
-    assertThat(state).isEqualTo(GenerationState.REASONING);
+    var emission = fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.REASONING);
+  }
+
+  @Test
+  void reset_shouldDropBufferedMarkerText() {
+    initWithReasoningTags();
+
+    fsm.evaluate(GenerationState.ANSWER, "<thi", 1);
+    fsm.reset();
+
+    assertThat(fsm.hasPending()).isFalse();
   }
 
   @Test
   void noTagsInText_shouldStayInAnswer() {
     initWithReasoningTags();
 
-    var state = fsm.evaluate(
+    var emission = fsm.evaluate(
       GenerationState.ANSWER,
-      "just normal text without tags"
+      "just normal text without tags",
+      1
     );
-    assertThat(state).isEqualTo(GenerationState.ANSWER);
+
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emit()).isEqualTo("just normal text without tags");
   }
 
   // ── Helpers ────────────────────────────────────────────────────────

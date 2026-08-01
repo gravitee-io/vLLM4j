@@ -15,20 +15,27 @@
  */
 package io.gravitee.vllm.state;
 
+import java.util.List;
+
 /**
  * Defines the open/close tag boundaries for a {@link GenerationState}.
  *
- * <p>When the FSM detects {@code openTag} in the generated text, it
+ * <p>When the FSM detects one of {@code openTags} in the generated text, it
  * transitions into the associated state. When it detects {@code closeTag},
  * it transitions back to {@link GenerationState#ANSWER}.
  *
- * @param state    the generation state this tag pair activates
- * @param openTag  the opening marker (e.g. {@code "<think>"})
+ * <p>A channel may be opened by more than one marker — Harmony opens its tool
+ * channel as both {@code commentary} and {@code analysis}, and configuring only
+ * one of them leaks the other into the answer as raw text. Mirrors llamaj.cpp's
+ * {@code StateBounds}.
+ *
+ * @param state    the generation state these tags activate
+ * @param openTags the opening markers, any of which enters the state
  * @param closeTag the closing marker (e.g. {@code "</think>"})
  */
 public record TagBounds(
   GenerationState state,
-  String openTag,
+  List<String> openTags,
   String closeTag
 ) {
   public TagBounds {
@@ -36,10 +43,26 @@ public record TagBounds(
       "state must not be null"
     );
     if (
-      openTag == null || openTag.isEmpty()
+      openTags == null || openTags.isEmpty()
     ) throw new IllegalArgumentException("openTag must not be empty");
+    for (String openTag : openTags) {
+      if (
+        openTag == null || openTag.isEmpty()
+      ) throw new IllegalArgumentException("openTag must not be empty");
+    }
     if (
       closeTag == null || closeTag.isEmpty()
     ) throw new IllegalArgumentException("closeTag must not be empty");
+    openTags = List.copyOf(openTags);
+  }
+
+  /** Single-marker form. */
+  public TagBounds(GenerationState state, String openTag, String closeTag) {
+    this(state, openTag == null ? List.of() : List.of(openTag), closeTag);
+  }
+
+  /** The primary opening marker. */
+  public String openTag() {
+    return openTags.getFirst();
   }
 }

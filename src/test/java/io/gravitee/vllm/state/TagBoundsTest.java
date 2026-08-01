@@ -45,7 +45,7 @@ class TagBoundsTest {
   @Test
   void shouldRejectNullOpenTag() {
     assertThatThrownBy(() ->
-      new TagBounds(GenerationState.REASONING, null, "</think>")
+      new TagBounds(GenerationState.REASONING, (String) null, "</think>")
     )
       .isInstanceOf(IllegalArgumentException.class)
       .hasMessageContaining("openTag");
