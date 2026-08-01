@@ -16,6 +16,7 @@
 package io.gravitee.vllm.state;
 
 import io.gravitee.vllm.engine.FinishReason;
+import io.gravitee.vllm.state.StateEvaluation.Emission;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -82,6 +83,21 @@ public final class ConversationState {
     return this;
   }
 
+  /**
+   * Configures tool-call tag boundaries where the channel can be opened more
+   * than one way — Harmony uses both {@code commentary} and {@code analysis}.
+   * Each alternative must be complete from the start of a run; with only one
+   * configured, the other leaks into the answer as raw text.
+   *
+   * @param openTags the opening markers, any of which enters the tool channel
+   * @param closeTag the closing marker
+   * @return this
+   */
+  public ConversationState toolCall(List<String> openTags, String closeTag) {
+    tagBounds.add(new TagBounds(GenerationState.TOOLS, openTags, closeTag));
+    return this;
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────────────
 
   /**
@@ -90,12 +106,30 @@ public final class ConversationState {
    * @param promptTokenCount number of prompt tokens
    */
   public void initialize(int promptTokenCount) {
+    initialize(promptTokenCount, null);
+  }
+
+  /**
+   * Initializes the state for a new generation turn, seeding the starting state
+   * from the rendered prompt.
+   *
+   * <p>A chat template may end inside a span it opened itself (a template ending
+   * with {@code <think>}), and a continuation prompt may end anywhere inside an
+   * unfinished one. The model never re-emits that open tag, so without the seed
+   * the whole span is misclassified as answer.
+   *
+   * @param promptTokenCount number of prompt tokens
+   * @param prompt           the rendered prompt, or {@code null} if unavailable
+   */
+  public void initialize(int promptTokenCount, String prompt) {
     tokenTracking.initialize(promptTokenCount);
     if (!tagBounds.isEmpty()) {
       stateEvaluation.initialize(tagBounds);
     }
     stateEvaluation.reset();
-    currentState = GenerationState.ANSWER;
+    currentState = isClassificationEnabled()
+      ? stateEvaluation.initialState(prompt)
+      : GenerationState.ANSWER;
     finishReason = null;
   }
 
@@ -109,27 +143,60 @@ public final class ConversationState {
   /**
    * Evaluates a text delta, updating the generation state and token counters.
    *
+   * <p>The returned {@link Emission} carries the text that should actually be
+   * emitted for this step: tag markers are syntax and are suppressed, and while
+   * a partial marker is buffered nothing is emitted at all. Callers must emit
+   * {@link Emission#emit()} rather than the raw delta, or the markers reach the
+   * client verbatim.
+   *
    * @param delta      the new text fragment
    * @param tokenCount number of tokens this delta represents
-   * @return the generation state after this delta
+   * @return the state, the text to emit, and the tokens it accounts for
    */
-  public GenerationState evaluate(String delta, int tokenCount) {
-    GenerationState previousState = currentState;
-
-    if (isClassificationEnabled()) {
-      currentState = stateEvaluation.evaluate(currentState, delta);
+  public Emission evaluate(String delta, int tokenCount) {
+    if (!isClassificationEnabled()) {
+      tokenTracking.consume(currentState, tokenCount);
+      return new Emission(currentState, delta == null ? "" : delta, tokenCount);
     }
 
-    // Detect TOOLS → ANSWER transition → TOOL_CALL finish reason
+    GenerationState previousState = currentState;
+    Emission emission = stateEvaluation.evaluate(
+      currentState,
+      delta,
+      tokenCount
+    );
+    currentState = emission.state();
+
+    // Leaving the tool channel — by its close marker or by another channel's
+    // open marker — is what makes this generation a tool call.
     if (
       previousState == GenerationState.TOOLS &&
-      currentState == GenerationState.ANSWER
+      currentState != GenerationState.TOOLS
     ) {
       setFinishReason(FinishReason.TOOL_CALL);
     }
 
-    tokenTracking.consume(currentState, tokenCount);
-    return currentState;
+    // Buffered deltas count 0 now and their full weight when they resolve, so
+    // no token is lost or double-counted.
+    tokenTracking.consume(currentState, emission.emitTokens());
+    return emission;
+  }
+
+  /**
+   * Flushes text buffered behind an unconfirmed marker at the end of
+   * generation, attributing it to the current channel.
+   *
+   * <p>Callers must append {@link Emission#emit()} to the final delta: a
+   * generation that stops mid-marker (a truncated {@code </thin}) otherwise
+   * drops that text and its tokens on the floor.
+   */
+  public Emission flush() {
+    if (!isClassificationEnabled()) {
+      return new Emission(currentState, "", 0);
+    }
+    Emission emission = stateEvaluation.flushPending(currentState);
+    tokenTracking.consume(emission.state(), emission.emitTokens());
+    return emission;
   }
 
   // ── Finish reason (with priority logic from llamaj.cpp) ─────────────

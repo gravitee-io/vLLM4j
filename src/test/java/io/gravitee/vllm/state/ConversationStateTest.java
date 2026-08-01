@@ -65,17 +65,22 @@ class ConversationStateTest {
 
     // Reasoning phase
     var s1 = state.evaluate("<think>", 1);
-    assertThat(s1).isEqualTo(GenerationState.REASONING);
+    assertThat(s1.state()).isEqualTo(GenerationState.REASONING);
+    // The tag is syntax and is suppressed; only its token count survives.
+    assertThat(s1.emit()).isEmpty();
 
     var s2 = state.evaluate("I need to think about this...", 8);
-    assertThat(s2).isEqualTo(GenerationState.REASONING);
+    assertThat(s2.state()).isEqualTo(GenerationState.REASONING);
+    assertThat(s2.emit()).isEqualTo("I need to think about this...");
 
     var s3 = state.evaluate("</think>", 1);
-    assertThat(s3).isEqualTo(GenerationState.ANSWER);
+    assertThat(s3.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(s3.emit()).isEmpty();
 
     // Answer phase
     var s4 = state.evaluate("The answer is 42.", 5);
-    assertThat(s4).isEqualTo(GenerationState.ANSWER);
+    assertThat(s4.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(s4.emit()).isEqualTo("The answer is 42.");
 
     // Verify counters
     assertThat(state.inputTokens()).isEqualTo(10);
