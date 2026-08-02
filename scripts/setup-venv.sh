@@ -153,11 +153,23 @@ install_common() {
 #
 # Pinning the toolchain to torch's CUDA major.minor (==X.Y.*) keeps the
 # compiler, assembler and headers coherent so the kernels build.
+#
+# Only CUDA 13 is affected. NVIDIA publishes these toolchain wheels on PyPI for
+# 13.x only — for a CUDA 12 torch (what --torch-backend=auto picks on a pre-580
+# driver) they come from torch's own cu12 index as one coherent set, nothing
+# floats, and there is nothing to align. Asking for "==12.9.*" there is not a
+# no-op but a hard resolve failure ("only nvidia-cuda-nvcc<12.9.dev0 and
+# >12.10.dev0 are available"), so bail out before that instead.
 align_cuda_toolchain() {
   local cuda_mm
   cuda_mm="$("$VENV_PYTHON" -c 'import torch; print(torch.version.cuda or "")')"
   if [[ -z "$cuda_mm" ]]; then
     echo "Could not determine torch CUDA version — skipping toolchain alignment."
+    return 0
+  fi
+
+  if [[ "${cuda_mm%%.*}" -lt 13 ]]; then
+    echo "torch is a CUDA ${cuda_mm} build — toolchain already coherent, skipping alignment."
     return 0
   fi
 
@@ -259,13 +271,77 @@ case "$BACKEND" in
     ;;
 
   cuda)
-    if "$VENV_PYTHON" -c "import vllm" &>/dev/null; then
-      echo "vllm already installed — skipping."
-    else
-      echo "Installing vLLM ${VLLM_VERSION} (CUDA wheel) ..."
+    {
+      # Pick the wheel that matches the *driver*, not the newest build.
+      #
+      # The wheel on PyPI is a CUDA 13 build — vllm._C links libcudart.so.13 —
+      # and --torch-backend=auto pairs it with whatever torch the driver allows.
+      # On a pre-580 driver those two disagree and the engine dies at import:
+      #   ImportError: libcudart.so.13: cannot open shared object file
+      # Forcing torch to cu130 instead only moves the failure one step later:
+      #   RuntimeError: The NVIDIA driver on your system is too old (found
+      #   version 12080)
+      # because CUDA 13 needs r580+, which no 12.x driver satisfies.
+      #
+      # The release page carries a +cu129 wheel alongside the default one, and
+      # that whole stack (vllm._C, torch, the nvidia-*-cu12 runtime) runs on any
+      # 12.x driver. Choose between them on the driver version, and pin
+      # --torch-backend to match so uv cannot resolve torch into the other major.
+      DRIVER_MAJOR="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
+        | head -1 | cut -d. -f1)"
 
+      if [[ -n "$DRIVER_MAJOR" && "$DRIVER_MAJOR" -lt 580 ]]; then
+        echo "Driver ${DRIVER_MAJOR}.x predates CUDA 13 (needs r580+) — using the +cu129 wheel."
+        VLLM_PACKAGE="https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu129-cp38-abi3-manylinux_2_28_$(uname -m).whl"
+        TORCH_BACKEND="cu129"
+        WANT_CUDA_MAJOR="12"
+      else
+        VLLM_PACKAGE="vllm==${VLLM_VERSION}"
+        TORCH_BACKEND="auto"
+        WANT_CUDA_MAJOR="13"
+      fi
+    }
+
+    # "Already installed" is not the same as "usable". A venv built before this
+    # check existed — or on a machine with a different driver — can hold a CUDA
+    # 13 vllm beside a cu129 torch, a pairing that only fails at model load:
+    #   ImportError: libcudart.so.13: cannot open shared object file
+    # Compare what is actually installed against what the driver needs and
+    # reinstall over it, so re-running this script repairs a venv instead of
+    # declaring it fine.
+    CURRENT_CUDA_MAJOR="$("$VENV_PYTHON" -c \
+      'import torch; print((torch.version.cuda or "").split(".")[0])' 2>/dev/null || true)"
+
+    # Probe vllm._C, not vllm. The mismatch this repairs lives in the compiled
+    # extension, and `import vllm` sails straight past it:
+    #   >>> import vllm            # fine
+    #   >>> import vllm._C         # ImportError: libcudart.so.13
+    # The engine only trips over it at model load, which is exactly the late,
+    # opaque failure this check exists to prevent.
+    if "$VENV_PYTHON" -c "import vllm._C" &>/dev/null &&
+       [[ "$CURRENT_CUDA_MAJOR" == "$WANT_CUDA_MAJOR" ]]; then
+      echo "vllm already installed and built for CUDA ${CURRENT_CUDA_MAJOR} — skipping."
+    else
+      if "$VENV_PYTHON" -c "import importlib.metadata as m; m.version('vllm')" &>/dev/null; then
+        # Two different breakages, and the torch version alone cannot tell them
+        # apart: a cu13 vllm wheel next to a cu12 torch has the *right* torch and
+        # still fails to load its kernels.
+        if "$VENV_PYTHON" -c "import vllm._C" &>/dev/null; then
+          echo "Repairing venv: torch targets CUDA ${CURRENT_CUDA_MAJOR:-unknown}," \
+               "this driver needs CUDA ${WANT_CUDA_MAJOR}."
+        else
+          echo "Repairing venv: vllm's compiled extension does not load — its CUDA runtime" \
+               "does not match torch (CUDA ${CURRENT_CUDA_MAJOR:-unknown})."
+        fi
+      fi
+
+      echo "Installing vLLM ${VLLM_VERSION} (CUDA wheel, torch backend ${TORCH_BACKEND}) ..."
+
+      # --reinstall-package is a no-op on a fresh venv and the whole point on a
+      # stale one: without it uv keeps the satisfied-but-wrong versions.
       "$UV_BIN" pip install --python "$VENV_PYTHON" \
-        "vllm==${VLLM_VERSION}" --torch-backend=auto
+        --reinstall-package vllm --reinstall-package torch \
+        "$VLLM_PACKAGE" --torch-backend="$TORCH_BACKEND"
     fi
 
     install_common
