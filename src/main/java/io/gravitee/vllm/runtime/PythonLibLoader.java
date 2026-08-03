@@ -34,9 +34,16 @@ import java.util.stream.Stream;
  *       at the base interpreter's {@code bin} directory; libpython lives in
  *       the sibling {@code lib} directory (or, for macOS framework builds,
  *       the {@code Python} binary in the prefix itself)</li>
- *   <li>Fallback: let jextract's static initializer handle it (absolute path
- *       baked in at code-generation time)</li>
  * </ol>
+ *
+ * <p>There is no fallback, by design. jextract can bake an absolute
+ * {@code System.load(...)} into the generated class, but that path is the one
+ * the <em>build</em> machine had: the jar then runs only there, and fails
+ * everywhere else — in a container, in CI, on a colleague's laptop — with an
+ * {@code UnsatisfiedLinkError} naming a directory that does not exist, however
+ * correctly the venv is configured. {@code generate-sources.sh} strips that
+ * block, so this class is the only thing that loads libpython, and it decides
+ * from where the process is actually running.
  */
 public final class PythonLibLoader {
 
@@ -48,19 +55,37 @@ public final class PythonLibLoader {
    * Ensures libpython is loaded. Idempotent — subsequent calls are no-ops.
    *
    * @param venvDir the venv directory (for deriving libpython from {@code pyvenv.cfg})
+   * @throws IllegalStateException if no libpython can be found. Failing here,
+   *         naming every location that was tried, beats the
+   *         {@code UnsatisfiedLinkError} the caller would otherwise hit on the
+   *         first binding call — which names only one path and explains nothing.
    */
   public static void ensureLoaded(Path venvDir) {
     if (loaded) return;
     synchronized (PythonLibLoader.class) {
       if (loaded) return;
       String path = resolve(venvDir);
-      if (path != null) {
-        System.load(path);
+      if (path == null) {
+        throw new IllegalStateException(notFoundMessage(venvDir));
       }
-      // If path is null, we rely on CPython.<clinit> to load it
-      // (absolute path baked in by jextract at generate-sources time)
+      System.load(path);
       loaded = true;
     }
+  }
+
+  private static String notFoundMessage(Path venvDir) {
+    return (
+      "Could not locate libpython. Tried, in order: the VLLM4J_LIBPYTHON_PATH " +
+      "environment variable, the vllm4j.libpython.path system property, " +
+      (venvDir == null
+          ? "and no venv was supplied (set -Dvllm4j.venv or " +
+          "VllmEngine.builder().venvPath(...))."
+          : "'" +
+          venvDir +
+          "/lib/libpython*', and the base interpreter named by '" +
+          venvDir +
+          "/pyvenv.cfg'.")
+    );
   }
 
   /**

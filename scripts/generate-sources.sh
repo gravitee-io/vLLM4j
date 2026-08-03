@@ -225,3 +225,72 @@ mkdir -p "$OUTPUT_DIR"
   "${PYTHON_INCLUDE_DIR}/Python.h"
 
 echo "jextract completed. Generated sources at: ${OUTPUT_DIR}"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PART 3 — Strip jextract's baked-in libpython load
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# --use-system-load-library with an absolute --library emits, into the generated
+# header class:
+#
+#   static { System.load("<libpython path on the machine that ran jextract>"); }
+#
+# That static initializer runs the moment any binding method is touched, and it
+# hard-codes a path that only exists on the build machine. The jar then works
+# there and nowhere else: in a container, or on a colleague's laptop, the first
+# call dies with
+#   UnsatisfiedLinkError: Can't load library: /home/<builder>/.../libpython3.12.so
+# no matter how correctly the venv, LD_PRELOAD and -Dvllm4j.venv are set up.
+#
+# PythonLibLoader already loads libpython before any binding is touched, and it
+# resolves the path where the *running* process is, not where the build was:
+# VLLM4J_LIBPYTHON_PATH, vllm4j.libpython.path, <venv>/lib, then pyvenv.cfg's
+# base interpreter. Removing the block leaves that as the single mechanism and
+# makes the artifact portable.
+#
+# The --library flag stays: jextract still needs it to resolve symbols while
+# generating, and the path is what makes the symbol lookup work at that point.
+strip_baked_library_load() {
+  local file="$1"
+  "$VENV_PYTHON" - "$file" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    source = handle.read()
+
+# The generated block is exactly:
+#     static {
+#         System.load("...");
+#     }
+pattern = re.compile(
+    r"[ \t]*static\s*\{\s*System\.load\((\"[^\"]*\")\);\s*\}\n",
+    re.MULTILINE,
+)
+stripped, count = pattern.subn("", source)
+if count:
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(stripped)
+print(f"  {path}: removed {count} baked System.load call(s)")
+PY
+}
+
+found_load=false
+while IFS= read -r generated; do
+  if grep -q 'System\.load(' "$generated"; then
+    strip_baked_library_load "$generated"
+    found_load=true
+  fi
+done < <(find "$OUTPUT_DIR" -name '*.java')
+
+if [[ "$found_load" == false ]]; then
+  echo "  no baked System.load found — nothing to strip."
+fi
+
+# A leftover absolute path here would silently rebuild the old, unportable jar.
+if grep -rn 'System\.load(' "$OUTPUT_DIR" >/dev/null 2>&1; then
+  echo "ERROR: a baked System.load survived in the generated sources:" >&2
+  grep -rn 'System\.load(' "$OUTPUT_DIR" >&2
+  exit 1
+fi
