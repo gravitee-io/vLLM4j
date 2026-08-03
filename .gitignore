@@ -38,3 +38,4 @@ build/
 ### vLLM4j build artifacts ###
 .venv/
 .jextract/
+.java-version
