@@ -436,7 +436,21 @@ public final class SamplingParams implements AutoCloseable, Freeable {
     checkNotBuilt();
     try (var gil = GIL.acquire()) {
       MemorySegment pyGuided = params.toPython(arena);
-      PythonTypes.putDictObj(arena, kwargs, "guided_decoding", pyGuided);
+      // vLLM 0.21 renamed the field: `guided_decoding` became
+      // `structured_outputs`, and passing the old name is not deprecated but
+      // fatal — "Unexpected keyword argument 'guided_decoding'" — so every
+      // constrained request failed outright on 0.23. Probe the class rather
+      // than the version, and keep the old name working for older engines.
+      String field = PythonTypes.isNull(
+          PythonCall.importClassOrNull(
+            arena,
+            "vllm.sampling_params",
+            "StructuredOutputsParams"
+          )
+        )
+        ? "guided_decoding"
+        : "structured_outputs";
+      PythonTypes.putDictObj(arena, kwargs, field, pyGuided);
       PythonTypes.decref(pyGuided);
     }
     return this;

@@ -84,4 +84,17 @@ class VllmRequestTest {
     assertThat(lora.loraIntId()).isEqualTo(1);
     assertThat(lora.loraPath()).isEqualTo("path/to/adapter");
   }
+
+  @Test
+  void ofTokens_validates_like_every_other_form() {
+    // SamplingParams needs CPython, so the reachable assertion here is that the
+    // token-id factory goes through the same compact constructor rather than
+    // around it. The accessors are covered against a live engine in
+    // SegmentTokenizationTest.
+    assertThatThrownBy(() ->
+      VllmRequest.ofTokens("req-tok", "prompt", java.util.List.of(1, 2), null)
+    )
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("samplingParams");
+  }
 }

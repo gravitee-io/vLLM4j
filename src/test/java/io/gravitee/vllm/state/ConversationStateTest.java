@@ -179,4 +179,44 @@ class ConversationStateTest {
     assertThat(state.tokenTracking().inputTokens()).isEqualTo(10);
     assertThat(state.tokenTracking().totalOutputTokens()).isEqualTo(5);
   }
+
+  // ── A turn that ends inside the tool channel ────────────────────────
+
+  @Test
+  void aTurnEndingInsideTheToolChannel_isAToolCall() {
+    // The agent flow: <|call|> is an EOS token, so generation STOPS on the close
+    // marker. evaluate() never sees a TOOLS -> ANSWER transition, and before this
+    // the turn reached the executor as finish_reason=stop — so the tool span was
+    // shown to the user as raw text instead of being extracted and executed.
+    state.initialize(5);
+
+    state.evaluate("<tool_call>", 1);
+    state.evaluate("{\"name\":\"read\"}", 4);
+    state.flush();
+
+    assertThat(state.finishReason()).isEqualTo(FinishReason.TOOL_CALL);
+  }
+
+  @Test
+  void aTurnEndingInTheAnswerChannel_isNotAToolCall() {
+    // The guard: flushing must not stamp TOOL_CALL on an ordinary reply.
+    state.initialize(5);
+
+    state.evaluate("Just an answer.", 3);
+    state.flush();
+
+    assertThat(state.finishReason()).isNotEqualTo(FinishReason.TOOL_CALL);
+  }
+
+  @Test
+  void aCompletedToolCallStillReportsToolCall() {
+    // Unchanged behaviour when the close marker does arrive mid-stream.
+    state.initialize(5);
+
+    state.evaluate("<tool_call>", 1);
+    state.evaluate("</tool_call>", 1);
+    state.flush();
+
+    assertThat(state.finishReason()).isEqualTo(FinishReason.TOOL_CALL);
+  }
 }

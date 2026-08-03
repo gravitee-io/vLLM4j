@@ -167,8 +167,16 @@ public final class PythonRuntime implements AutoCloseable {
     // subprocess consults for executable resolution.
     configureBuildToolchain(venv);
 
-    // Set backend-specific env vars before Py_Initialize
+    // Set backend-specific env vars before Py_Initialize.
+    //
+    // Defaults, not overrides: a value already in the environment was put there
+    // deliberately, and silently replacing it leaves no way to re-test a setting
+    // we default off because a backend is buggy.
     for (Map.Entry<String, String> entry : backend.envVars().entrySet()) {
+      String existing = System.getenv(entry.getKey());
+      if (existing != null && !existing.isBlank()) {
+        continue;
+      }
       setEnv(entry.getKey(), entry.getValue());
     }
 

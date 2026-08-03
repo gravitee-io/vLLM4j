@@ -182,4 +182,31 @@ public final class PythonCall {
     PythonTypes.decref(module);
     return cls;
   }
+
+  /**
+   * Like {@link #importClass}, but returns {@code NULL} instead of raising when
+   * the class is absent — for names that moved between vLLM versions, where
+   * "not there" is an answer rather than an error.
+   */
+  public static MemorySegment importClassOrNull(
+    Arena arena,
+    String moduleName,
+    String className
+  ) {
+    MemorySegment module = CPythonBinding.PyImport_ImportModule(
+      arena.allocateFrom(moduleName)
+    );
+    PythonErrors.checkPythonError("import " + moduleName);
+    MemorySegment cls = CPythonBinding.PyObject_GetAttrString(
+      module,
+      arena.allocateFrom(className)
+    );
+    if (PythonTypes.isNull(cls)) {
+      // Clear the AttributeError the caller is deliberately tolerating —
+      // leaving it set would surface at the next unrelated error check.
+      CPythonBinding.PyErr_Clear();
+    }
+    PythonTypes.decref(module);
+    return cls;
+  }
 }
