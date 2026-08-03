@@ -110,6 +110,31 @@ public final class GuidedDecodingParams {
   }
 
   /**
+   * Constrains only the regions of the output that a trigger string opens,
+   * leaving everything else free.
+   *
+   * <p>This is what makes constrained tool calls possible without breaking
+   * prose. Applying a JSON schema to a whole request forces the model to answer
+   * in JSON even when it just wants to talk; a structural tag arms the schema
+   * only after the trigger appears — for Harmony, the tool-call header — and
+   * releases it at {@code end}. Everything outside stays unconstrained.
+   *
+   * <p>The spec is the JSON vLLM's xgrammar backend parses:
+   * <pre>{@code
+   * {"structures": [{"begin": "<|channel|>commentary to=functions.write<|constrain|>json<|message|>",
+   *                  "schema": { ... the tool's parameter schema ... },
+   *                  "end": "<|call|>"}],
+   *  "triggers": ["<|channel|>commentary to=functions."]}
+   * }</pre>
+   *
+   * @param spec the structural-tag JSON
+   * @return guided decoding params carrying that spec
+   */
+  public static GuidedDecodingParams structuralTag(String spec) {
+    return new GuidedDecodingParams("structural_tag", spec, null);
+  }
+
+  /**
    * Builds the Python {@code GuidedDecodingParams} object.
    *
    * @param arena arena for native allocations
@@ -144,6 +169,11 @@ public final class GuidedDecodingParams {
         PythonTypes.putDictObj(arena, kwargs, "grammar", pyGrammar);
         PythonTypes.decref(pyGrammar);
       }
+      case "structural_tag" -> {
+        MemorySegment pySpec = PythonTypes.pyStr(arena, value);
+        PythonTypes.putDictObj(arena, kwargs, "structural_tag", pySpec);
+        PythonTypes.decref(pySpec);
+      }
       case "json_object" -> {
         PythonTypes.putDictObj(
           arena,
@@ -154,11 +184,22 @@ public final class GuidedDecodingParams {
       }
     }
 
-    MemorySegment guidedClass = PythonCall.importClass(
+    // vLLM renamed this in 0.21: GuidedDecodingParams became
+    // StructuredOutputsParams, and SamplingParams gained a `structured_outputs`
+    // field in place of `guided_decoding`. Prefer the new name and fall back to
+    // the old one, so the same jar drives both.
+    MemorySegment guidedClass = PythonCall.importClassOrNull(
       arena,
       "vllm.sampling_params",
-      "GuidedDecodingParams"
+      "StructuredOutputsParams"
     );
+    if (PythonTypes.isNull(guidedClass)) {
+      guidedClass = PythonCall.importClass(
+        arena,
+        "vllm.sampling_params",
+        "GuidedDecodingParams"
+      );
+    }
     MemorySegment result = PythonCall.callWithKwargs(guidedClass, kwargs);
     PythonErrors.checkPythonError("GuidedDecodingParams construction");
     PythonTypes.decref(kwargs);

@@ -75,4 +75,19 @@ class GuidedDecodingParamsTest {
     assertThat(choice).isNotSameAs(grammar);
     assertThat(grammar).isNotSameAs(jsonObject);
   }
+
+  @Test
+  void structuralTag_carriesTheSpecVerbatim() {
+    // Tool-call constraining rides on this: the schema arms only after the
+    // trigger appears, so prose stays unconstrained while the arguments cannot
+    // come out malformed.
+    String spec =
+      "{\"structures\":[{\"begin\":\"<|channel|>commentary to=functions.edit\"," +
+      "\"schema\":{\"type\":\"object\"},\"end\":\"<|call|>\"}]," +
+      "\"triggers\":[\"<|channel|>commentary to=functions.\"]}";
+
+    var params = GuidedDecodingParams.structuralTag(spec);
+
+    assertThat(params).isNotNull();
+  }
 }

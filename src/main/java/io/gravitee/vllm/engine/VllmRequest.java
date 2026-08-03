@@ -15,6 +15,8 @@
  */
 package io.gravitee.vllm.engine;
 
+import java.util.List;
+
 /**
  * A generation request to be submitted to a {@link VllmEngine}.
  *
@@ -54,7 +56,8 @@ public record VllmRequest(
   SamplingParams samplingParams,
   MultiModalData multiModalData,
   int priority,
-  LoraRequest loraRequest
+  LoraRequest loraRequest,
+  List<Integer> promptTokenIds
 ) {
   /**
    * Compact constructor — validates required fields.
@@ -71,6 +74,26 @@ public record VllmRequest(
     }
   }
 
+  /** Full form without pre-tokenized input. */
+  public VllmRequest(
+    String requestId,
+    String prompt,
+    SamplingParams samplingParams,
+    MultiModalData multiModalData,
+    int priority,
+    LoraRequest loraRequest
+  ) {
+    this(
+      requestId,
+      prompt,
+      samplingParams,
+      multiModalData,
+      priority,
+      loraRequest,
+      null
+    );
+  }
+
   /**
    * Text-only constructor (backward-compatible, default priority 0, no LoRA).
    */
@@ -79,7 +102,7 @@ public record VllmRequest(
     String prompt,
     SamplingParams samplingParams
   ) {
-    this(requestId, prompt, samplingParams, null, 0, null);
+    this(requestId, prompt, samplingParams, null, 0, null, null);
   }
 
   /**
@@ -91,7 +114,7 @@ public record VllmRequest(
     SamplingParams samplingParams,
     MultiModalData multiModalData
   ) {
-    this(requestId, prompt, samplingParams, multiModalData, 0, null);
+    this(requestId, prompt, samplingParams, multiModalData, 0, null, null);
   }
 
   /**
@@ -103,7 +126,51 @@ public record VllmRequest(
     SamplingParams samplingParams,
     LoraRequest loraRequest
   ) {
-    this(requestId, prompt, samplingParams, null, 0, loraRequest);
+    this(requestId, prompt, samplingParams, null, 0, loraRequest, null);
+  }
+
+  /**
+   * Submits pre-tokenized input instead of letting vLLM tokenize {@code prompt}.
+   *
+   * <p>The point is control over special tokens. vLLM tokenizes a text prompt with
+   * the HuggingFace tokenizer's defaults, which match added tokens anywhere in the
+   * string — so {@code <|channel|>} appearing inside a user message, a tool
+   * argument or a tool result is promoted to the real control token (id 200005 for
+   * gpt-oss) rather than staying data. That silently rewrites content, and lets
+   * untrusted tool output inject protocol structure into the conversation. Encoding
+   * each segment separately — template markup with specials parsed, interpolated
+   * data with {@link VllmEngine#encode(String, boolean)} and
+   * {@code parseSpecialTokens = false} — and submitting the resulting ids removes
+   * the ambiguity entirely.
+   *
+   * <p>{@code prompt} is still carried: it remains the text used for logging and
+   * for seeding the generation state from the rendered conversation.
+   *
+   * @param requestId      unique request identifier
+   * @param prompt         the rendered prompt these ids were built from
+   * @param promptTokenIds the exact tokens to feed the model
+   * @param samplingParams sampling configuration
+   */
+  public static VllmRequest ofTokens(
+    String requestId,
+    String prompt,
+    List<Integer> promptTokenIds,
+    SamplingParams samplingParams
+  ) {
+    return new VllmRequest(
+      requestId,
+      prompt,
+      samplingParams,
+      null,
+      0,
+      null,
+      promptTokenIds
+    );
+  }
+
+  /** Returns {@code true} if this request carries pre-tokenized input. */
+  public boolean hasPromptTokenIds() {
+    return promptTokenIds != null && !promptTokenIds.isEmpty();
   }
 
   /** Returns {@code true} if this request includes multimodal data. */

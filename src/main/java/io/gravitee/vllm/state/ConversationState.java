@@ -241,6 +241,7 @@ public final class ConversationState {
     if (!isClassificationEnabled()) {
       return new Emission(currentState, "", 0);
     }
+    GenerationState previousState = currentState;
     Emission emission = stateEvaluation.flushPending(currentState);
     // A flush can now close a span: when generation stops on a marker that is
     // also the prefix of a longer alternative — <|call|> ending an agent turn —
@@ -248,6 +249,26 @@ public final class ConversationState {
     // currentState() truthful, so a turn does not end reported as still inside
     // a tool call.
     currentState = emission.state();
+
+    // ...and a turn that ENDS in the tool channel is a tool call, whether the
+    // close marker settled here or never arrived at all. evaluate() only stamps
+    // TOOL_CALL when it sees the transition mid-stream, so an agent turn whose
+    // <|call|> is the EOS token — the normal case — reached the executor as
+    // finish_reason=stop, and the span was rendered to the user as content
+    // instead of being extracted and run.
+    //
+    // Only when something was actually captured in there. Markers that share a
+    // prefix — Harmony's reasoning-close and tool-open agree for 34 characters —
+    // let the machine enter TOOLS provisionally and resolve straight back out,
+    // emitting nothing. Reporting a tool call for an empty span invites callers
+    // to hunt for one in the plain answer and manufacture it.
+    if (
+      previousState == GenerationState.TOOLS &&
+      tokenTracking.outputTokens(GenerationState.TOOLS) > 0
+    ) {
+      setFinishReason(FinishReason.TOOL_CALL);
+    }
+
     tokenTracking.consume(emission.state(), emission.emitTokens());
     return emission;
   }

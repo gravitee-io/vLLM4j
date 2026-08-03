@@ -228,9 +228,17 @@ public final class StateEvaluation {
     GenerationState bestTarget = null;
     boolean anyPrefix = false;
 
-    // (a) the current state's close markers
-    if (currentState != GenerationState.ANSWER) {
-      for (String marker : tagsByState.get(currentState).closeTags()) {
+    // (a) close markers.
+    //
+    // In ANSWER these are EVERY state's closes, not none. A close marker reaching
+    // the answer channel is stray syntax by definition — the span it would have
+    // ended is not open — and the model does emit them there: after a tool call,
+    // generation restarts fresh in ANSWER and Harmony still prefixes its reply
+    // with the final-channel header, so without this the header is unmatchable
+    // and lands in the user's content as "<|channel|>final<|message|>DONE".
+    // Matching costs nothing (the state is already ANSWER); it only suppresses.
+    for (TagBounds bounds : closeCandidates(currentState)) {
+      for (String marker : bounds.closeTags()) {
         if (accumulated.startsWith(marker)) {
           // Longest wins: "<|call|>" and "<|call|><|start|>assistant..." can
           // both match, and the longer one suppresses more of the header.
@@ -333,6 +341,18 @@ public final class StateEvaluation {
       flushed + restart.emit(),
       flushedTokens + restart.emitTokens()
     );
+  }
+
+  /**
+   * The states whose close markers are candidates right now: the current state
+   * when inside a span, every configured state when in ANSWER — where a close
+   * marker can only be leftover syntax from a span the prompt already opened.
+   */
+  private List<TagBounds> closeCandidates(GenerationState currentState) {
+    if (currentState != GenerationState.ANSWER) {
+      return List.of(tagsByState.get(currentState));
+    }
+    return List.copyOf(tagsByState.values());
   }
 
   private static boolean insideOpenSpan(String prompt, TagBounds bounds) {

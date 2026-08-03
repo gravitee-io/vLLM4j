@@ -376,6 +376,61 @@ class StateEvaluationTest {
     assertThat(emission.emit()).isEqualTo("just normal text without tags");
   }
 
+  // ── Stray syntax in the answer channel ─────────────────────────────
+
+  @Test
+  void aCloseMarkerArrivingInAnswer_shouldBeSuppressed() {
+    // The reported bug. After a tool call, generation restarts in ANSWER and
+    // Harmony still emits its final-channel header first — no span is open for
+    // it to close, so before this it reached the client as
+    // "<|channel|>final<|message|>DONE".
+    fsm.initialize(
+      List.of(
+        new TagBounds(
+          GenerationState.REASONING,
+          List.of("<|channel|>analysis<|message|>"),
+          List.of("<|channel|>final<|message|>")
+        )
+      )
+    );
+
+    var emission = fsm.evaluate(
+      GenerationState.ANSWER,
+      "<|channel|>final<|message|>DONE",
+      1
+    );
+
+    assertThat(emission.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(emission.emit()).isEqualTo("DONE");
+  }
+
+  @Test
+  void aStrayCloseMarkerSplitAcrossDeltas_shouldNotLeakEither() {
+    initWithReasoningTags();
+
+    var first = fsm.evaluate(GenerationState.ANSWER, "</thi", 1);
+    assertThat(first.emit()).isEmpty();
+
+    var second = fsm.evaluate(GenerationState.ANSWER, "nk>Answer", 1);
+    assertThat(second.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(second.emit()).isEqualTo("Answer");
+  }
+
+  @Test
+  void ordinaryAnswerText_shouldStillPassThroughUntouched() {
+    // The guard on the above: suppressing stray closes must not start eating
+    // content that merely begins like one.
+    initWithReasoningTags();
+
+    var emission = fsm.evaluate(
+      GenerationState.ANSWER,
+      "</thinking about it",
+      1
+    );
+
+    assertThat(emission.emit()).isEqualTo("</thinking about it");
+  }
+
   // ── Helpers ────────────────────────────────────────────────────────
 
   private void initWithReasoningTags() {

@@ -227,7 +227,28 @@ public final class VllmEngine implements AutoCloseable {
       MemorySegment pyRequestId = PythonTypes.pyStr(arena, request.requestId());
 
       MemorySegment pyPrompt;
-      if (request.isMultiModal()) {
+      if (request.hasPromptTokenIds()) {
+        // TokensPrompt: {"prompt_token_ids": [...]}. Handing vLLM a text prompt
+        // means the HuggingFace tokenizer decides where special tokens are, and
+        // it matches them anywhere in the string — including inside data the
+        // caller never meant as markup. See VllmRequest.ofTokens.
+        pyPrompt = CPythonBinding.PyDict_New();
+        MemorySegment pyIds = pyIntList(request.promptTokenIds());
+        PythonTypes.putDictObj(arena, pyPrompt, "prompt_token_ids", pyIds);
+        PythonTypes.decref(pyIds);
+        if (request.isMultiModal()) {
+          MemorySegment pyMmData = request.multiModalData().toPythonDict(arena);
+          if (pyMmData != null) {
+            PythonTypes.putDictObj(
+              arena,
+              pyPrompt,
+              "multi_modal_data",
+              pyMmData
+            );
+            PythonTypes.decref(pyMmData);
+          }
+        }
+      } else if (request.isMultiModal()) {
         // Build TextPrompt dict: {"prompt": text, "multi_modal_data": {...}}
         pyPrompt = CPythonBinding.PyDict_New();
         MemorySegment pyText = PythonTypes.pyStr(arena, request.prompt());
@@ -870,6 +891,80 @@ public final class VllmEngine implements AutoCloseable {
    * @param text the text to tokenize
    * @return the list of token IDs
    */
+  /**
+   * Encodes one segment of a prompt, choosing whether special-token markup in it
+   * is protocol or data.
+   *
+   * <p>With {@code parseSpecialTokens = false} the tokenizer is asked for
+   * {@code split_special_tokens=True}, so a literal {@code <|channel|>} encodes as
+   * ordinary text (7 tokens for gpt-oss) instead of the control token id 200005,
+   * and round-trips through {@link #decode} unchanged. That is what makes it safe
+   * to place untrusted content — a user message, a tool argument, a tool result —
+   * into a prompt: without it, any Harmony-looking literal in that content is
+   * promoted to real protocol, which both corrupts the data and lets a file or a
+   * web page inject conversation structure.
+   *
+   * <p>Special tokens are never added implicitly here ({@code add_special_tokens=False}),
+   * because a segment is a fragment of a larger prompt: the template supplies the
+   * markers. Concatenating the ids of every segment yields the full prompt, to be
+   * submitted via {@link VllmRequest#ofTokens}.
+   *
+   * @param text               the segment to tokenize
+   * @param parseSpecialTokens {@code true} for template-authored markup, whose
+   *                           markers must become control tokens;
+   *                           {@code false} for interpolated data
+   * @return the list of token IDs
+   */
+  public List<Integer> encode(String text, boolean parseSpecialTokens) {
+    checkNotClosed();
+    try (var gil = GIL.acquire()) {
+      MemorySegment tokenizer = PythonTypes.getAttr(arena, engine, "tokenizer");
+      PythonErrors.checkPythonError("engine.tokenizer");
+
+      MemorySegment encodeFn = PythonTypes.getAttr(arena, tokenizer, "encode");
+      PythonErrors.checkPythonError("getattr(tokenizer, encode)");
+
+      MemorySegment pyText = PythonTypes.pyStr(arena, text);
+      MemorySegment args = PythonCall.makeTuple(pyText);
+
+      MemorySegment kwargs = CPythonBinding.PyDict_New();
+      putDictBool(kwargs, "add_special_tokens", false);
+      // Only set when suppressing: older tokenizers reject the keyword, and the
+      // default already parses specials, so the common path stays untouched.
+      if (!parseSpecialTokens) {
+        putDictBool(kwargs, "split_special_tokens", true);
+      }
+
+      MemorySegment pyResult = PythonCall.pyObjectCall(encodeFn, args, kwargs);
+      PythonErrors.checkPythonError("tokenizer.encode(split_special_tokens)");
+
+      List<Integer> result = mapIntList(pyResult);
+      PythonTypes.decref(kwargs);
+      PythonTypes.decref(args);
+      PythonTypes.decref(pyText);
+      PythonTypes.decref(encodeFn);
+      PythonTypes.decref(tokenizer);
+      return result;
+    }
+  }
+
+  /** Builds a Python {@code list[int]}; caller owns the returned reference. */
+  private static MemorySegment pyIntList(List<Integer> values) {
+    MemorySegment list = CPythonBinding.PyList_New(0);
+    for (Integer value : values) {
+      MemorySegment item = CPythonBinding.PyLong_FromLong(value);
+      CPythonBinding.PyList_Append(list, item);
+      PythonTypes.decref(item);
+    }
+    return list;
+  }
+
+  private void putDictBool(MemorySegment dict, String key, boolean value) {
+    MemorySegment pyValue = CPythonBinding.PyBool_FromLong(value ? 1 : 0);
+    PythonTypes.putDictObj(arena, dict, key, pyValue);
+    PythonTypes.decref(pyValue);
+  }
+
   public List<Integer> encode(String text) {
     checkNotClosed();
     try (var gil = GIL.acquire()) {
