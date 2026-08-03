@@ -36,7 +36,7 @@ import java.util.List;
 public record TagBounds(
   GenerationState state,
   List<String> openTags,
-  String closeTag
+  List<String> closeTags
 ) {
   public TagBounds {
     if (state == null) throw new IllegalArgumentException(
@@ -51,18 +51,47 @@ public record TagBounds(
       ) throw new IllegalArgumentException("openTag must not be empty");
     }
     if (
-      closeTag == null || closeTag.isEmpty()
+      closeTags == null || closeTags.isEmpty()
     ) throw new IllegalArgumentException("closeTag must not be empty");
+    for (String closeTag : closeTags) {
+      if (
+        closeTag == null || closeTag.isEmpty()
+      ) throw new IllegalArgumentException("closeTag must not be empty");
+    }
     openTags = List.copyOf(openTags);
+    closeTags = List.copyOf(closeTags);
   }
 
   /** Single-marker form. */
   public TagBounds(GenerationState state, String openTag, String closeTag) {
-    this(state, openTag == null ? List.of() : List.of(openTag), closeTag);
+    this(
+      state,
+      openTag == null ? List.of() : List.of(openTag),
+      closeTag == null ? List.of() : List.of(closeTag)
+    );
+  }
+
+  /** Many openings, one closing. */
+  public TagBounds(
+    GenerationState state,
+    List<String> openTags,
+    String closeTag
+  ) {
+    this(state, openTags, closeTag == null ? List.of() : List.of(closeTag));
   }
 
   /** The primary opening marker. */
   public String openTag() {
     return openTags.getFirst();
+  }
+
+  /**
+   * The primary closing marker.
+   *
+   * <p>Kept for callers that only ever configured one, and for prompt scanning,
+   * where the question is merely whether a span was closed at all.
+   */
+  public String closeTag() {
+    return closeTags.getFirst();
   }
 }

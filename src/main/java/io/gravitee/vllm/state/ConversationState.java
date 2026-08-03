@@ -98,6 +98,53 @@ public final class ConversationState {
     return this;
   }
 
+  /**
+   * Configures reasoning boundaries where the channel can be left more than one
+   * way.
+   *
+   * <p>Harmony needs this: reasoning ends into the final channel via
+   * {@code <|end|><|start|>assistant<|channel|>final<|message|>} when the model
+   * answers directly, but the run that precedes the final channel is terminated
+   * by {@code <|call|>} when a tool call intervenes. One marker cannot cover
+   * both, and the one that misses leaks its header into the answer.
+   *
+   * @param openTags  the opening markers, any of which enters reasoning
+   * @param closeTags the closing markers, any of which leaves it
+   * @return this
+   */
+  public ConversationState reasoning(
+    List<String> openTags,
+    List<String> closeTags
+  ) {
+    tagBounds.add(
+      new TagBounds(GenerationState.REASONING, openTags, closeTags)
+    );
+    return this;
+  }
+
+  /**
+   * Configures tool-call boundaries where the channel can be left more than one
+   * way.
+   *
+   * <p>{@code <|call|>} ends a tool call, but when the model continues into an
+   * answer rather than stopping, the final-channel header follows immediately
+   * and belongs to the marker — otherwise it is stranded in the answer as a
+   * visible {@code <|channel|>final<|message|>}. Listing both lets the longer
+   * one win when it arrives and the shorter one settle the span when generation
+   * stops at the call, which is the normal agent flow.
+   *
+   * @param openTags  the opening markers, any of which enters the tool channel
+   * @param closeTags the closing markers, any of which leaves it
+   * @return this
+   */
+  public ConversationState toolCall(
+    List<String> openTags,
+    List<String> closeTags
+  ) {
+    tagBounds.add(new TagBounds(GenerationState.TOOLS, openTags, closeTags));
+    return this;
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────────────
 
   /**
@@ -195,6 +242,12 @@ public final class ConversationState {
       return new Emission(currentState, "", 0);
     }
     Emission emission = stateEvaluation.flushPending(currentState);
+    // A flush can now close a span: when generation stops on a marker that is
+    // also the prefix of a longer alternative — <|call|> ending an agent turn —
+    // the buffered match is settled here. Adopting the emitted state keeps
+    // currentState() truthful, so a turn does not end reported as still inside
+    // a tool call.
+    currentState = emission.state();
     tokenTracking.consume(emission.state(), emission.emitTokens());
     return emission;
   }
