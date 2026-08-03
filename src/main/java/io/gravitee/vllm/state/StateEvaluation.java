@@ -73,6 +73,16 @@ public final class StateEvaluation {
   private int pendingTokens;
 
   /**
+   * A close/open marker that has matched completely while a LONGER candidate
+   * sharing its prefix is still possible. Held rather than acted on, and
+   * settled when the stream diverges or ends. {@code null} when no such match
+   * is outstanding.
+   */
+  private String provisionalMarker;
+
+  private GenerationState provisionalTarget;
+
+  /**
    * Initializes the FSM with the given tag configurations.
    * Must be called before {@link #evaluate}.
    */
@@ -128,6 +138,21 @@ public final class StateEvaluation {
   public Emission flushPending(GenerationState currentState) {
     if (pendingTokens == 0) {
       return new Emission(currentState, "", 0);
+    }
+    if (provisionalMarker != null) {
+      // Generation ended while a longer close marker was still possible — the
+      // agent case, where <|call|> IS the last token. Settle for the match that
+      // did complete, so the span closes and the state machine does not end
+      // stuck inside it.
+      String marker = provisionalMarker;
+      GenerationState target = provisionalTarget;
+      if (currentState != GenerationState.ANSWER) {
+        markOccurred(currentState);
+      }
+      String remainder = pending.toString().substring(marker.length());
+      int tokens = pendingTokens;
+      resetBuffer();
+      return new Emission(target, remainder, tokens);
     }
     String text = pending.toString();
     int tokens = pendingTokens;
@@ -203,14 +228,19 @@ public final class StateEvaluation {
     GenerationState bestTarget = null;
     boolean anyPrefix = false;
 
-    // (a) the current state's close marker
+    // (a) the current state's close markers
     if (currentState != GenerationState.ANSWER) {
-      String marker = tagsByState.get(currentState).closeTag();
-      if (accumulated.startsWith(marker)) {
-        bestMarker = marker;
-        bestTarget = GenerationState.ANSWER;
-      } else if (marker.startsWith(accumulated)) {
-        anyPrefix = true;
+      for (String marker : tagsByState.get(currentState).closeTags()) {
+        if (accumulated.startsWith(marker)) {
+          // Longest wins: "<|call|>" and "<|call|><|start|>assistant..." can
+          // both match, and the longer one suppresses more of the header.
+          if (bestMarker == null || marker.length() > bestMarker.length()) {
+            bestMarker = marker;
+            bestTarget = GenerationState.ANSWER;
+          }
+        } else if (marker.startsWith(accumulated)) {
+          anyPrefix = true;
+        }
       }
     }
 
@@ -231,6 +261,20 @@ public final class StateEvaluation {
       }
     }
 
+    if (bestMarker != null && anyPrefix) {
+      // Matched, but a LONGER candidate is still viable: "<|call|>" is complete
+      // while "<|call|><|start|>assistant<|channel|>final<|message|>" may still
+      // be arriving. Committing now would make the longer marker unreachable
+      // forever; waiting without remembering this match would strand the state
+      // machine when it never arrives. So hold the match provisionally and keep
+      // buffering — it is settled on divergence or at end of stream.
+      provisionalMarker = bestMarker;
+      provisionalTarget = bestTarget;
+      pending.append(piece);
+      pendingTokens += tokenCount;
+      return new Emission(currentState, "", 0);
+    }
+
     if (bestMarker != null) {
       // Confirmed: marker text suppressed; the boundary-spanning remainder (if
       // any) is the first text of the post-flip channel; all covered tokens are
@@ -249,6 +293,20 @@ public final class StateEvaluation {
       pending.append(piece);
       pendingTokens += tokenCount;
       return new Emission(currentState, "", 0);
+    }
+
+    if (provisionalMarker != null) {
+      // The longer candidate never came. Settle for the match we held: suppress
+      // it, flip, and hand the rest of the accumulated text to the new channel.
+      String marker = provisionalMarker;
+      GenerationState target = provisionalTarget;
+      if (currentState != GenerationState.ANSWER) {
+        markOccurred(currentState);
+      }
+      String remainder = accumulated.substring(marker.length());
+      int tokens = pendingTokens + tokenCount;
+      resetBuffer();
+      return new Emission(target, remainder, tokens);
     }
 
     if (pendingTokens == 0) {
@@ -286,12 +344,18 @@ public final class StateEvaluation {
     if (lastStart < 0) {
       return false;
     }
-    return lastStart > prompt.lastIndexOf(bounds.closeTag());
+    int lastClose = -1;
+    for (String marker : bounds.closeTags()) {
+      lastClose = Math.max(lastClose, prompt.lastIndexOf(marker));
+    }
+    return lastStart > lastClose;
   }
 
   private void resetBuffer() {
     pending.setLength(0);
     pendingTokens = 0;
+    provisionalMarker = null;
+    provisionalTarget = null;
   }
 
   /** TOOLS may repeat; every other state closes for good. */
