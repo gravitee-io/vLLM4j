@@ -287,8 +287,18 @@ case "$BACKEND" in
       # that whole stack (vllm._C, torch, the nvidia-*-cu12 runtime) runs on any
       # 12.x driver. Choose between them on the driver version, and pin
       # --torch-backend to match so uv cannot resolve torch into the other major.
-      DRIVER_MAJOR="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
-        | head -1 | cut -d. -f1)"
+      # A build-only box has no nvidia-smi at all, and under `set -e` a missing
+      # command inside a command substitution takes the whole script down with
+      # 127 before a single package is installed — with stderr swallowed by the
+      # redirect, so the log just stops after "Creating virtual environment".
+      # Absent driver means "cannot tell": fall through to the default wheel,
+      # which is what a machine that only compiles wants anyway.
+      if command -v nvidia-smi >/dev/null 2>&1; then
+        DRIVER_MAJOR="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null \
+          | head -1 | cut -d. -f1 || true)"
+      else
+        DRIVER_MAJOR=""
+      fi
 
       if [[ -n "$DRIVER_MAJOR" && "$DRIVER_MAJOR" -lt 580 ]]; then
         echo "Driver ${DRIVER_MAJOR}.x predates CUDA 13 (needs r580+) — using the +cu129 wheel."

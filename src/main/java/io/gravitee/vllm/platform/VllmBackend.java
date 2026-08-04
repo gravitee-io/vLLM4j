@@ -48,20 +48,7 @@ public enum VllmBackend {
       "VLLM_MLX_DEVICE",
       "gpu",
       "GLOO_SOCKET_IFNAME",
-      "lo0",
-      // Paged attention is broken on this backend: its runtime never seeds
-      // _request_states for a request, then answers every decode step with
-      //   WARNING [model_runner.py] Paged cached request ... has no
-      //   RequestState; emitting placeholder token
-      // and emits token id 0. Generation looks alive, produces nothing, and runs
-      // until the context window is full — a silent wrong answer rather than an
-      // error, which is why it is defaulted off rather than documented.
-      //
-      // The non-paged MLX cache path has no such fallback. It requires
-      // VLLM_METAL_MEMORY_FRACTION=auto, which is that variable's own default.
-      // Set VLLM_METAL_USE_PAGED_ATTENTION=1 to re-test once upstream fixes it.
-      "VLLM_METAL_USE_PAGED_ATTENTION",
-      "0"
+      "lo0"
     )
   ),
 

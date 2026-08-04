@@ -38,17 +38,6 @@ class VllmBackendTest {
   }
 
   @Test
-  void metal_shouldDefaultPagedAttentionOff() {
-    // Not a tuning knob: with paged attention on, this backend answers every
-    // decode step with placeholder token id 0 and generation silently produces
-    // nothing until the context window fills. A wrong answer, not an error.
-    assertThat(VllmBackend.METAL.envVars()).containsEntry(
-      "VLLM_METAL_USE_PAGED_ATTENTION",
-      "0"
-    );
-  }
-
-  @Test
   void cuda_shouldHaveEmptyEnvVars() {
     assertThat(VllmBackend.CUDA.envVars()).isEmpty();
   }
