@@ -402,8 +402,13 @@ jobs:
           path: "/home/circleci/vLLM4j"
       - run-tests:
           os: "linux"
+          # cpu, not cuda: this executor has no GPU, so a cuda venv pulls ~3 GB of
+          # wheels that nothing here can load, and the driver probe in setup-venv.sh
+          # has nothing to probe. The cpu backend builds the same vLLM core from
+          # source and exercises the same Java, which is all this job verifies —
+          # integration is off, and the GPU path is validated on real hardware.
           platform: "x86_64"
-          backend: "cuda"
+          backend: "cpu"
           run_integration: false
           run_vlm_integration: false
 

@@ -174,7 +174,10 @@ public final class PythonRuntime implements AutoCloseable {
     // we default off because a backend is buggy.
     for (Map.Entry<String, String> entry : backend.envVars().entrySet()) {
       String existing = System.getenv(entry.getKey());
-      if (existing != null && !existing.isBlank()) {
+      boolean alreadyChosen =
+        (existing != null && !existing.isBlank()) ||
+        EXPLICIT_ENV.contains(entry.getKey());
+      if (alreadyChosen) {
         continue;
       }
       setEnv(entry.getKey(), entry.getValue());
@@ -593,7 +596,14 @@ public final class PythonRuntime implements AutoCloseable {
    * <p>Also useful to inject credentials such as {@code HF_TOKEN} before
    * the vLLM Python engine initialises and downloads gated models.
    */
+  /** Variables set through {@link #setEnv}, which must win over backend defaults. */
+  private static final java.util.Set<String> EXPLICIT_ENV =
+    java.util.concurrent.ConcurrentHashMap.newKeySet();
+
   public static void setEnv(String name, String value) {
+    // Recorded so backend defaults do not overwrite it: setenv() is invisible to
+    // System.getenv, which snapshots the environment at JVM start.
+    EXPLICIT_ENV.add(name);
     var lookup = Linker.nativeLinker().defaultLookup();
     var setenvAddr = lookup
       .find("setenv")
