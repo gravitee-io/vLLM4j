@@ -431,6 +431,91 @@ class StateEvaluationTest {
     assertThat(emission.emit()).isEqualTo("</thinking about it");
   }
 
+  // ── Re-entering a channel within one generation ────────────────────
+
+  @Test
+  void aRepeatableChannelCanBeReEnteredInOneGeneration() {
+    // Harmony chains channels: analysis, back to final, then commentary — all in
+    // ONE generation. Non-repeatable, that second opening stops matching and its
+    // header reaches the client as raw text, with the prose billed as answer.
+    fsm.initialize(
+      List.of(
+        new TagBounds(
+          GenerationState.REASONING,
+          List.of(
+            "<|channel|>analysis<|message|>",
+            "<|channel|>commentary<|message|>"
+          ),
+          List.of("<|channel|>final<|message|>"),
+          true
+        )
+      )
+    );
+
+    assertThat(
+      fsm
+        .evaluate(GenerationState.ANSWER, "<|channel|>analysis<|message|>", 1)
+        .state()
+    ).isEqualTo(GenerationState.REASONING);
+    assertThat(
+      fsm
+        .evaluate(GenerationState.REASONING, "<|channel|>final<|message|>", 1)
+        .state()
+    ).isEqualTo(GenerationState.ANSWER);
+
+    var reopened = fsm.evaluate(
+      GenerationState.ANSWER,
+      "<|channel|>commentary<|message|>",
+      1
+    );
+
+    assertThat(reopened.state()).isEqualTo(GenerationState.REASONING);
+    assertThat(reopened.emit()).isEmpty();
+  }
+
+  @Test
+  void aNonRepeatableChannelStillOccursOnce() {
+    // The guard this preserves: a model that types "<think>" in its answer must
+    // not re-open reasoning after the real block closed.
+    initWithReasoningTags();
+
+    fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+    fsm.evaluate(GenerationState.REASONING, "</think>", 1);
+    var second = fsm.evaluate(GenerationState.ANSWER, "<think>", 1);
+
+    assertThat(second.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(second.emit()).isEqualTo("<think>");
+  }
+
+  @Test
+  void aRepeatableChannelAbsorbsItsOwnOpenerWhileInsideIt() {
+    // Models re-announce the channel they are already in: Harmony emits a second
+    // <|channel|>analysis<|message|> mid-thought. A state's own openers were
+    // skipped as candidates, leaving that header in the reasoning text as raw
+    // protocol.
+    fsm.initialize(
+      List.of(
+        new TagBounds(
+          GenerationState.REASONING,
+          List.of("<|channel|>analysis<|message|>"),
+          List.of("<|channel|>final<|message|>"),
+          true
+        )
+      )
+    );
+
+    fsm.evaluate(GenerationState.ANSWER, "<|channel|>analysis<|message|>", 1);
+    fsm.evaluate(GenerationState.REASONING, "thinking... ", 1);
+    var again = fsm.evaluate(
+      GenerationState.REASONING,
+      "<|channel|>analysis<|message|>",
+      1
+    );
+
+    assertThat(again.state()).isEqualTo(GenerationState.REASONING);
+    assertThat(again.emit()).isEmpty();
+  }
+
   // ── Helpers ────────────────────────────────────────────────────────
 
   private void initWithReasoningTags() {
