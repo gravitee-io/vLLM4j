@@ -52,11 +52,12 @@ import java.util.Map;
  * match wins, since markers may share prefixes.
  *
  * <h2>Re-entry rules</h2>
- * <ul>
- *   <li>{@code REASONING} can occur at most once per generation.</li>
- *   <li>{@code TOOLS} can occur multiple times (models may produce several
- *       tool calls).</li>
- * </ul>
+ * Per channel, from its {@link TagBounds#repeatable()} flag. TOOLS defaults to
+ * repeating (models emit several calls) and everything else to occurring once —
+ * but "once" is a ChatML property, not a property of reasoning: Harmony can run
+ * analysis, return to the final channel, then open commentary inside a SINGLE
+ * generation, and a channel that cannot re-open stops matching, leaving its
+ * header in the answer as raw text.
  */
 public final class StateEvaluation {
 
@@ -254,7 +255,13 @@ public final class StateEvaluation {
 
     // (b) the other states' open markers — cross-transitions when not in ANSWER
     for (TagBounds bounds : tagsByState.values()) {
-      if (bounds.state() == currentState || alreadyOccurred(bounds)) {
+      // A channel's OWN openers count while inside it, when it repeats. Models
+      // re-announce the channel they are already in — Harmony emits a second
+      // <|channel|>analysis<|message|> mid-thought — and skipping it leaves the
+      // header in the reasoning text as raw protocol. The transition is a no-op;
+      // the point is that the marker is recognised, and therefore suppressed.
+      boolean ownChannel = bounds.state() == currentState;
+      if ((ownChannel && !bounds.repeatable()) || alreadyOccurred(bounds)) {
         continue;
       }
       for (String marker : bounds.openTags()) {
@@ -378,16 +385,17 @@ public final class StateEvaluation {
     provisionalTarget = null;
   }
 
-  /** TOOLS may repeat; every other state closes for good. */
+  /** A channel closes for good unless its configuration says it may repeat. */
   private void markOccurred(GenerationState state) {
-    occurred.put(state, state != GenerationState.TOOLS);
+    TagBounds bounds = tagsByState.get(state);
+    occurred.put(state, bounds == null || !bounds.repeatable());
   }
 
   private boolean alreadyOccurred(TagBounds bounds) {
     if (bounds == null) {
       return true;
     }
-    if (bounds.state() == GenerationState.TOOLS) {
+    if (bounds.repeatable()) {
       return false;
     }
     return Boolean.TRUE.equals(occurred.get(bounds.state()));

@@ -36,7 +36,8 @@ import java.util.List;
 public record TagBounds(
   GenerationState state,
   List<String> openTags,
-  List<String> closeTags
+  List<String> closeTags,
+  boolean repeatable
 ) {
   public TagBounds {
     if (state == null) throw new IllegalArgumentException(
@@ -60,6 +61,43 @@ public record TagBounds(
     }
     openTags = List.copyOf(openTags);
     closeTags = List.copyOf(closeTags);
+  }
+
+  /**
+   * Whether this channel may be entered again after it closes.
+   *
+   * <p>One {@code <think>…</think>} block per generation is a property of ChatML,
+   * not of reasoning: Harmony CHAINS channels, so a single generation can run
+   * analysis, return to the final channel, and then open commentary — and a
+   * channel that cannot re-open stops matching, leaving its header to reach the
+   * caller as raw text with its tokens billed as answer. TOOLS has always been
+   * re-entrant for the same reason (models emit several calls); this makes the
+   * exemption configurable rather than hard-coded to one enum constant.
+   *
+   * <p>Defaults preserve the historical behaviour: TOOLS repeats, everything else
+   * occurs at most once.
+   */
+  public TagBounds(
+    GenerationState state,
+    List<String> openTags,
+    List<String> closeTags
+  ) {
+    this(state, openTags, closeTags, state == GenerationState.TOOLS);
+  }
+
+  /** Many openings and closings, with explicit re-entry. */
+  public TagBounds(
+    GenerationState state,
+    List<String> openTags,
+    String closeTag,
+    boolean repeatable
+  ) {
+    this(
+      state,
+      openTags,
+      closeTag == null ? List.of() : List.of(closeTag),
+      repeatable
+    );
   }
 
   /** Single-marker form. */

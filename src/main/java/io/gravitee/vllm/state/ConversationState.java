@@ -145,6 +145,30 @@ public final class ConversationState {
     return this;
   }
 
+  /**
+   * Configures reasoning tag boundaries for a dialect that re-enters the channel.
+   *
+   * <p>Harmony chains channels rather than wrapping one span: a generation can run
+   * analysis, return to the final channel, and then open commentary. Left
+   * non-repeatable, that second opening never matches — its header reaches the
+   * client as raw text and its tokens are billed as answer.
+   *
+   * @param openTags   the opening markers
+   * @param closeTags  the closing markers
+   * @param repeatable whether the channel may be entered again after it closes
+   * @return this
+   */
+  public ConversationState reasoning(
+    List<String> openTags,
+    List<String> closeTags,
+    boolean repeatable
+  ) {
+    tagBounds.add(
+      new TagBounds(GenerationState.REASONING, openTags, closeTags, repeatable)
+    );
+    return this;
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────────────
 
   /**

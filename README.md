@@ -236,6 +236,7 @@ iterator.addRequest(request, state);
 
 iterator.stream().forEach(output -> {
     GenerationState segment = output.state();  // REASONING, TOOLS, or ANSWER
+    // output.delta() is already marker-free — see "How markers are matched" below
 
     switch (segment) {
         case REASONING -> System.err.print(output.delta());   // internal reasoning
@@ -253,6 +254,59 @@ System.out.println("Total output:     " + result.totalOutputTokens());
 System.out.println("Total (w/ input): " + result.totalTokens());
 System.out.println("Finish reason:    " + result.finishReason());
 ```
+
+Markers can have alternatives on either end, for dialects that enter or leave a
+channel more than one way:
+
+```java
+var harmony = new ConversationState()
+        .reasoning(
+            List.of("<|channel|>analysis<|message|>"),
+            List.of("<|end|><|start|>assistant<|channel|>final<|message|>",
+                    "<|call|><|start|>assistant<|channel|>final<|message|>",
+                    "<|channel|>final<|message|>"))   // the bare header, after a tool call
+        .toolCall(
+            List.of("<|channel|>commentary to=functions.",
+                    "<|channel|>analysis to=functions."),
+            List.of("<|call|>"));
+```
+
+#### How markers are matched
+
+Markers are **syntax, not content**: a confirmed marker emits nothing, and its
+tokens are billed to the channel it opened. Streaming `delta()` is therefore safe
+to forward verbatim — there is nothing to strip. Four rules follow, each of which
+is a bug it prevents:
+
+- **Matched at the start of a run, longest first.** A marker matches only where a
+  run begins — after the previous one resolved, or at the start of generation. A
+  variant you did not configure never matches: it refutes, and the whole header
+  lands in the current channel as visible text.
+- **A split marker is buffered, never leaked.** Text that is a strict prefix of a
+  candidate is withheld (empty delta) until the marker completes or the text
+  diverges; on divergence the buffered text is released into the current channel,
+  in order. `ConversationState#flush()` releases anything still held when
+  generation stops mid-marker, so no token is lost — call it at the end of a turn.
+- **A close marker arriving in ANSWER is suppressed too.** No span is open for it
+  to close, so it can only be stray syntax — and models emit it: after a tool call
+  the next turn starts fresh and Harmony still prefixes its reply with the
+  final-channel header. List that bare header among the closes, or the reply reads
+  `<|channel|>final<|message|>DONE`.
+- **A turn that ends inside the tool channel reports `TOOL_CALL`.** When the close
+  marker is itself an EOS token (`<|call|>`), generation halts on it and no
+  transition is ever seen mid-stream. An empty span never counts.
+- **A channel occurs once unless it says otherwise.** `TagBounds.repeatable`
+  defaults to `true` for TOOLS and `false` elsewhere — the ChatML rule, and what
+  stops a literal `<think>` in an answer from re-opening reasoning. Harmony breaks
+  it: one generation can run analysis, return to the final channel, then open a
+  commentary preamble, and a channel that cannot re-open stops matching. Use
+  `reasoning(opens, closes, true)` there, or the second header reaches the client
+  as raw text with its tokens billed as answer.
+
+Channels chain rather than nest: a tool call opening straight out of a reasoning
+span closes it implicitly. `initialize(promptTokenCount, prompt)` also seeds the
+starting state from a prompt that left a span open — a chat template ending in
+`<think>` — since the model never re-emits that opening marker.
 
 ### Tool-use (multi-turn)
 
@@ -328,6 +382,17 @@ var jsonGuide = GuidedDecodingParams.json("""
 
 // Regex pattern
 var regexGuide = GuidedDecodingParams.regex("[A-Z]{2}-\\d{4}");
+
+// Structural tag — constrain ONLY what a trigger opens, leaving prose free.
+// A whole-request schema would force the model to answer in JSON even when it is
+// just talking; this arms the schema at the tool-call header and releases it at
+// "end", which is what makes constrained tool arguments possible.
+var toolGuide = GuidedDecodingParams.structuralTag(structuralTagJson);
+// structuralTagJson:
+// {"structures": [{"begin": "<|channel|>commentary to=functions.write<|constrain|>json<|message|>",
+//                  "schema": { ...the tool's parameter schema... },
+//                  "end":   "<|call|>"}],
+//  "triggers":   ["<|channel|>commentary to=functions."]}
 
 // Choice from list
 var choiceGuide = GuidedDecodingParams.choice(List.of("positive", "negative", "neutral"));
@@ -414,6 +479,32 @@ String text = engine.decode(tokens);
 // Get vocabulary size
 int vocabSize = engine.vocabSize();
 ```
+
+#### Encoding data as data
+
+vLLM tokenizes a **text** prompt with the tokenizer's defaults, which match added
+tokens *anywhere* in the string. That is right for a chat template's own markup and
+wrong for everything interpolated into it: a literal `<|channel|>` in a user message,
+a tool argument, or a tool result is promoted to the real control token (id 200005
+for gpt-oss). The content is silently rewritten, and untrusted output — a file, a web
+page, a tool result — can inject conversation structure.
+
+Encode each segment for what it is, then submit the ids:
+
+```java
+List<Integer> ids = new ArrayList<>();
+ids.addAll(engine.encode("<|im_start|>user\n", true));    // markup: specials parsed
+ids.addAll(engine.encode(untrustedToolResult, false));     // data: specials split
+ids.addAll(engine.encode("<|im_end|>\n<|im_start|>assistant\n", true));
+
+engine.addRequest(VllmRequest.ofTokens("req-1", renderedPrompt, ids, sp));
+```
+
+`encode(text, false)` asks the tokenizer for `split_special_tokens`, so the marker
+encodes as ordinary text and round-trips through `decode` unchanged. Segments never
+add special tokens of their own (`add_special_tokens=False`), because a segment is a
+fragment of one prompt — concatenating them is the prompt. `ofTokens` still carries
+the rendered text, which is what seeds the generation state and what gets logged.
 
 ### Multimodal (image and audio)
 
