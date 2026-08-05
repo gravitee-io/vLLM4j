@@ -92,7 +92,9 @@ commands:
           name: Upgrade
           command: |
             export DEBIAN_FRONTEND=noninteractive
-            sudo apt -y update && sudo apt-get upgrade -y
+            # No apt upgrade: upgrading the whole image adds minutes per run and
+            # nothing here depends on newer packages than the image ships.
+            sudo apt -y update
       - run:
           name: Locale dependencies
           command: |
@@ -150,6 +152,21 @@ commands:
       backend:
         type: string
     steps:
+      # The cpu and metal backends compile the vLLM core from source, which
+      # takes 30+ minutes on a 4-vCPU executor. setup-venv.sh is idempotent —
+      # it skips the build when the right vllm is already in the venv — so
+      # caching the venv (plus uv's store, which holds the managed CPython and
+      # wheel cache) turns a warm run into a ~1-minute no-op. Keyed on the
+      # setup script itself: bumping VLLM_VERSION or any pin busts the cache.
+      # Linux-only: the mac executor lives under a different home and its
+      # checkout path makes the checksum template miss.
+      - when:
+          condition:
+            equal: ["linux", << parameters.os >>]
+          steps:
+            - restore_cache:
+                keys:
+                  - venv-v1-linux-<< parameters.backend >>-{{ checksum "vLLM4j/scripts/setup-venv.sh" }}
       - run:
           name: Setup venv (<< parameters.backend >> backend)
           # The metal and cpu backends compile the vLLM core from the release
@@ -165,6 +182,15 @@ commands:
               source $BASH_ENV
             fi
             bash scripts/setup-venv.sh -d . -v 3.12 -b << parameters.backend >>
+      - when:
+          condition:
+            equal: ["linux", << parameters.os >>]
+          steps:
+            - save_cache:
+                key: venv-v1-linux-<< parameters.backend >>-{{ checksum "vLLM4j/scripts/setup-venv.sh" }}
+                paths:
+                  - /home/circleci/vLLM4j/.venv
+                  - /home/circleci/.local/share/uv
 
   generate_sources:
     description: Generate jextract FFM bindings for a specific platform
@@ -400,6 +426,10 @@ jobs:
       - install_python_dependencies
       - checkout:
           path: "/home/circleci/vLLM4j"
+      - restore_cache:
+          keys:
+            - m2-v1-{{ checksum "vLLM4j/pom.xml" }}
+            - m2-v1-
       - run-tests:
           os: "linux"
           # cpu, not cuda: this executor has no GPU, so a cuda venv pulls ~3 GB of
@@ -411,6 +441,10 @@ jobs:
           backend: "cpu"
           run_integration: false
           run_vlm_integration: false
+      - save_cache:
+          key: m2-v1-{{ checksum "vLLM4j/pom.xml" }}
+          paths:
+            - /home/circleci/.m2/repository
 
   # ── Source Generation (main branch — for release) ────────────────────────
 
