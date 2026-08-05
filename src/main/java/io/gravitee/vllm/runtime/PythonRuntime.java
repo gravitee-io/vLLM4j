@@ -439,7 +439,7 @@ public final class PythonRuntime implements AutoCloseable {
 
     java.nio.file.Path prefix = PythonLibLoader.basePrefix(venv);
     if (prefix != null) {
-      java.nio.file.Path verified = withStdlib(prefix);
+      java.nio.file.Path verified = withStdlib(prefix, venvPythonVersion(venv));
       if (verified != null) {
         return verified.toString();
       }
@@ -465,7 +465,10 @@ public final class PythonRuntime implements AutoCloseable {
    * Returns {@code prefix} if it holds a Python standard library, otherwise the
    * framework prefix nested under it, otherwise {@code null}.
    */
-  private static java.nio.file.Path withStdlib(java.nio.file.Path prefix) {
+  private static java.nio.file.Path withStdlib(
+    java.nio.file.Path prefix,
+    String version
+  ) {
     if (hasStdlib(prefix)) {
       return prefix;
     }
@@ -474,6 +477,15 @@ public final class PythonRuntime implements AutoCloseable {
       "Frameworks/Python.framework/Versions"
     );
     if (java.nio.file.Files.isDirectory(versions)) {
+      // The version the venv was created from, when pyvenv.cfg records it:
+      // Files.list has no defined order, and a machine with several pythons
+      // installed must not resolve to a stdlib the venv was not built against.
+      if (version != null) {
+        java.nio.file.Path exact = versions.resolve(version);
+        if (java.nio.file.Files.isDirectory(exact) && hasStdlib(exact)) {
+          return exact;
+        }
+      }
       try (var entries = java.nio.file.Files.list(versions)) {
         return entries
           .filter(java.nio.file.Files::isDirectory)
@@ -482,6 +494,30 @@ public final class PythonRuntime implements AutoCloseable {
           .orElse(null);
       } catch (java.io.IOException ignored) {}
     }
+    return null;
+  }
+
+  /**
+   * Reads the venv's Python version as {@code "X.Y"} from pyvenv.cfg
+   * ({@code version = 3.12.4} or {@code version_info = 3.12.4}), or
+   * {@code null} when absent.
+   */
+  private static String venvPythonVersion(java.nio.file.Path venv) {
+    java.nio.file.Path cfg = venv.resolve("pyvenv.cfg");
+    try {
+      for (String line : java.nio.file.Files.readAllLines(cfg)) {
+        String[] parts = line.split("=", 2);
+        if (parts.length != 2) continue;
+        String key = parts[0].strip();
+        if (!key.equals("version") && !key.equals("version_info")) continue;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+          "^(\\d+\\.\\d+)"
+        ).matcher(parts[1].strip());
+        if (m.find()) {
+          return m.group(1);
+        }
+      }
+    } catch (java.io.IOException ignored) {}
     return null;
   }
 

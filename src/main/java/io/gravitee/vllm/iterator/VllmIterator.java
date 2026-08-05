@@ -134,6 +134,15 @@ public final class VllmIterator
     VllmRequest request,
     ConversationState conversationState
   ) {
+    // The streaming path tracks one text buffer and one ConversationState per
+    // request id, and the packed step reads only the first completion — with
+    // n > 1 the candidates would be interleaved through both. Refuse rather
+    // than silently return one candidate of n.
+    if (request.samplingParams().n() > 1) {
+      throw new UnsupportedOperationException(
+        "VllmIterator does not support SamplingParams.n > 1; use one request per candidate"
+      );
+    }
     sequences.put(
       request.requestId(),
       new SequenceState(conversationState, request.prompt())

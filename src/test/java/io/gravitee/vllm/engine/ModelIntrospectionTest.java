@@ -55,7 +55,7 @@ class ModelIntrospectionTest {
     assertThat(shape.headDim()).isEqualTo(128);
     assertThat(shape.maxPositionEmbeddings()).isEqualTo(40960);
     assertThat(shape.multimodal()).isFalse();
-    assertThat(shape.bytesPerParam()).isEqualTo(2);
+    assertThat(shape.bitsPerParam()).isEqualTo(16);
     assertThat(shape.totalParams()).isCloseTo(
       751_632_384L,
       org.assertj.core.data.Offset.offset(1L)
@@ -70,9 +70,9 @@ class ModelIntrospectionTest {
     // would overstate the weights by 4x and reject a model that fits.
     var shape = ModelIntrospection.read(arena, "Qwen/Qwen3-4B-AWQ", false);
 
-    assertThat(shape.bytesPerParam())
-      .as("4-bit weights must not be read as 2-byte float16")
-      .isEqualTo(1);
+    assertThat(shape.bitsPerParam())
+      .as("4-bit weights must not be read as 16-bit float16")
+      .isEqualTo(4);
     assertThat(shape.numHiddenLayers()).isPositive();
   }
 

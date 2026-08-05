@@ -405,6 +405,25 @@ class StateEvaluationTest {
   }
 
   @Test
+  void aLiteralCloseMarkerInAnswerProse_isSuppressed_byDesign() {
+    // The deliberate cost of the Harmony fix above: a close marker is treated
+    // as stray syntax in ANSWER even when the model meant it as prose, so
+    // "Wrap it in </think> like so." loses the marker text. Markers are
+    // special tokens in every supported dialect, so a model producing one as
+    // content is already off-template; suppressing it is the safer failure.
+    initWithReasoningTags();
+
+    var before = fsm.evaluate(GenerationState.ANSWER, "Wrap it in ", 1);
+    var marker = fsm.evaluate(GenerationState.ANSWER, "</think>", 1);
+    var after = fsm.evaluate(GenerationState.ANSWER, " like so.", 1);
+
+    assertThat(before.emit()).isEqualTo("Wrap it in ");
+    assertThat(marker.emit()).isEmpty();
+    assertThat(marker.state()).isEqualTo(GenerationState.ANSWER);
+    assertThat(after.emit()).isEqualTo(" like so.");
+  }
+
+  @Test
   void aStrayCloseMarkerSplitAcrossDeltas_shouldNotLeakEither() {
     initWithReasoningTags();
 

@@ -670,19 +670,62 @@ public final class VllmEngine implements AutoCloseable {
    * has finished generating. For streaming output, use
    * {@link io.gravitee.vllm.iterator.VllmIterator} instead.
    *
+   * <p>Consumes {@code RequestOutputKind.DELTA} and accumulates per
+   * completion index on this side, for the same reason the iterator does:
+   * under CUMULATIVE every step marshals the entire text generated so far
+   * across the FFI boundary, which is quadratic in the response length. It
+   * also means a {@code SamplingParams} previously used with the iterator
+   * behaves identically here — both entry points set the output kind they
+   * consume.
+   *
    * @param request the request to generate
    * @return the final request output with all completions
    */
   public RequestOutput generate(VllmRequest request) {
     checkNotClosed();
+    useDeltaOutput(request.samplingParams().get());
     addRequest(request);
 
+    // Per completion index: DELTA spreads text, token ids and logprobs across
+    // the intermediate outputs, so each list is rebuilt by concatenation.
+    Map<Integer, StringBuilder> texts = new java.util.TreeMap<>();
+    Map<Integer, List<Integer>> tokenIds = new HashMap<>();
+    Map<Integer, List<Map<Integer, LogprobEntry>>> logprobs = new HashMap<>();
+    Map<Integer, FinishReason> finishReasons = new HashMap<>();
     RequestOutput last = null;
+    List<Integer> promptTokenIds = null;
+    List<Map<Integer, LogprobEntry>> promptLogprobs = null;
+
     while (hasUnfinishedRequests()) {
-      List<RequestOutput> outputs = step();
-      for (RequestOutput out : outputs) {
-        if (out.requestId().equals(request.requestId())) {
-          last = out;
+      for (RequestOutput out : step()) {
+        if (!out.requestId().equals(request.requestId())) {
+          continue;
+        }
+        last = out;
+        // Prompt-level fields may only be populated on early outputs.
+        if (out.promptTokenIds() != null && !out.promptTokenIds().isEmpty()) {
+          promptTokenIds = out.promptTokenIds();
+        }
+        if (out.promptLogprobs() != null) {
+          promptLogprobs = out.promptLogprobs();
+        }
+        for (CompletionOutput comp : out.outputs()) {
+          texts
+            .computeIfAbsent(comp.index(), k -> new StringBuilder())
+            .append(comp.text() != null ? comp.text() : "");
+          if (comp.tokenIds() != null) {
+            tokenIds
+              .computeIfAbsent(comp.index(), k -> new ArrayList<>())
+              .addAll(comp.tokenIds());
+          }
+          if (comp.logprobs() != null) {
+            logprobs
+              .computeIfAbsent(comp.index(), k -> new ArrayList<>())
+              .addAll(comp.logprobs());
+          }
+          if (comp.finishReason() != null) {
+            finishReasons.put(comp.index(), comp.finishReason());
+          }
         }
       }
     }
@@ -692,7 +735,29 @@ public final class VllmEngine implements AutoCloseable {
         "Request " + request.requestId() + " produced no output"
       );
     }
-    return last;
+
+    List<CompletionOutput> completions = new ArrayList<>();
+    for (var entry : texts.entrySet()) {
+      int index = entry.getKey();
+      completions.add(
+        new CompletionOutput(
+          index,
+          entry.getValue().toString(),
+          tokenIds.getOrDefault(index, List.of()),
+          finishReasons.get(index),
+          logprobs.get(index)
+        )
+      );
+    }
+    return new RequestOutput(
+      last.requestId(),
+      completions,
+      last.finished(),
+      promptTokenIds,
+      last.numCachedTokens(),
+      last.metrics(),
+      promptLogprobs
+    );
   }
 
   // ── Tokenizer / template access ────────────────────────────────────────
