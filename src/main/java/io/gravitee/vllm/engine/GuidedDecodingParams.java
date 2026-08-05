@@ -184,22 +184,14 @@ public final class GuidedDecodingParams {
       }
     }
 
-    // vLLM renamed this in 0.21: GuidedDecodingParams became
-    // StructuredOutputsParams, and SamplingParams gained a `structured_outputs`
-    // field in place of `guided_decoding`. Prefer the new name and fall back to
-    // the old one, so the same jar drives both.
-    MemorySegment guidedClass = PythonCall.importClassOrNull(
+    // StructuredOutputsParams since vLLM 0.21 (renamed from
+    // GuidedDecodingParams); this project pins 0.23, so the old class is not
+    // supported.
+    MemorySegment guidedClass = PythonCall.importClass(
       arena,
       "vllm.sampling_params",
       "StructuredOutputsParams"
     );
-    if (PythonTypes.isNull(guidedClass)) {
-      guidedClass = PythonCall.importClass(
-        arena,
-        "vllm.sampling_params",
-        "GuidedDecodingParams"
-      );
-    }
     MemorySegment result = PythonCall.callWithKwargs(guidedClass, kwargs);
     PythonErrors.checkPythonError("GuidedDecodingParams construction");
     PythonTypes.decref(kwargs);

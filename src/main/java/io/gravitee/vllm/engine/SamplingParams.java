@@ -91,6 +91,9 @@ public final class SamplingParams implements AutoCloseable, Freeable {
 
   private volatile boolean freed = false;
 
+  /** Java-side mirror of the {@code n} kwarg, for callers that must know it. */
+  private int n = 1;
+
   // ── Construction ────────────────────────────────────────────────────
 
   /**
@@ -244,10 +247,20 @@ public final class SamplingParams implements AutoCloseable, Freeable {
    */
   public SamplingParams n(int n) {
     checkNotBuilt();
+    this.n = n;
     try (var gil = GIL.acquire()) {
       PythonTypes.putDictInt(arena, kwargs, "n", n);
     }
     return this;
+  }
+
+  /**
+   * Returns the configured number of output sequences per prompt.
+   *
+   * @return the value passed to {@link #n(int)}, or 1
+   */
+  public int n() {
+    return n;
   }
 
   /**
@@ -436,21 +449,9 @@ public final class SamplingParams implements AutoCloseable, Freeable {
     checkNotBuilt();
     try (var gil = GIL.acquire()) {
       MemorySegment pyGuided = params.toPython(arena);
-      // vLLM 0.21 renamed the field: `guided_decoding` became
-      // `structured_outputs`, and passing the old name is not deprecated but
-      // fatal — "Unexpected keyword argument 'guided_decoding'" — so every
-      // constrained request failed outright on 0.23. Probe the class rather
-      // than the version, and keep the old name working for older engines.
-      String field = PythonTypes.isNull(
-          PythonCall.importClassOrNull(
-            arena,
-            "vllm.sampling_params",
-            "StructuredOutputsParams"
-          )
-        )
-        ? "guided_decoding"
-        : "structured_outputs";
-      PythonTypes.putDictObj(arena, kwargs, field, pyGuided);
+      // `structured_outputs` since vLLM 0.21 (renamed from `guided_decoding`);
+      // this project pins 0.23, so the old name is not supported.
+      PythonTypes.putDictObj(arena, kwargs, "structured_outputs", pyGuided);
       PythonTypes.decref(pyGuided);
     }
     return this;

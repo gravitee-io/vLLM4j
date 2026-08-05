@@ -771,9 +771,9 @@ Token Classification:
 ## Design decisions
 
 - **No `PyConfig`** -- uses `setenv(PYTHONHOME) + Py_InitializeEx(0)` (jextract can't generate PyConfig)
-- **GIL held permanently** on the main thread -- no release between calls
+- **GIL acquired per call** -- each FFI crossing takes and releases the GIL (`GIL.acquire()` in a try-with-resources), so the JVM side never holds it between calls
 - **`VLLM_ENABLE_V1_MULTIPROCESSING=0`** -- in-process mode required for embedded CPython
-- **Delta extraction** -- vLLM's `CompletionOutput.text` is cumulative; the iterator tracks only the previous text length (an `int`) to extract per-step deltas without holding a full copy of the generated text
+- **Delta streaming** -- the iterator flips the request's `SamplingParams` to `RequestOutputKind.DELTA`, so vLLM hands back only the new fragment each step; the cumulative text is accumulated Java-side and materialised on the final output only
 - **Lazy tokenIds/logprobs** -- `tokenIds` and `logprobs` are omitted from `VllmOutput` during streaming and emitted only on the final output (`finished=true`) to avoid O(n) per-step memory accumulation
 - **State classification is Java-side** -- a tag-based FSM classifies generated text (following llamaj.cpp's pattern)
 - **Tools are template-level** -- passed as a `tools` variable to the Jinja2 chat template

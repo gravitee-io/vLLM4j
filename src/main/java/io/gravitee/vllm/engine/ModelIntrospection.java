@@ -59,8 +59,9 @@ public final class ModelIntrospection {
    *                             i.e. the context length vLLM defaults to
    * @param multimodal           whether the config declares a vision or audio tower
    * @param totalParams          parameter count, or 0 when it cannot be determined
-   * @param bytesPerParam        storage width per parameter, accounting for
-   *                             quantization, or 0 when unknown
+   * @param bitsPerParam         storage width per parameter in bits, accounting
+   *                             for quantization (so 4-bit AWQ is 4, not a
+   *                             rounded-up byte), or 0 when unknown
    */
   public record ModelShape(
     int numHiddenLayers,
@@ -69,7 +70,7 @@ public final class ModelIntrospection {
     int maxPositionEmbeddings,
     boolean multimodal,
     long totalParams,
-    int bytesPerParam
+    int bitsPerParam
   ) {
     /** An entirely unknown shape — the caller should skip its estimate. */
     public static final ModelShape UNKNOWN = new ModelShape(
@@ -84,7 +85,15 @@ public final class ModelIntrospection {
 
     /** True when there is enough here to size the weights and the KV cache. */
     public boolean isUsable() {
-      return totalParams > 0 && bytesPerParam > 0 && numHiddenLayers > 0;
+      // The weights need totalParams and bitsPerParam; the KV cache needs the
+      // layer count and the per-layer geometry.
+      return (
+        totalParams > 0 &&
+        bitsPerParam > 0 &&
+        numHiddenLayers > 0 &&
+        numKvHeads > 0 &&
+        headDim > 0
+      );
     }
   }
 
@@ -132,7 +141,7 @@ public final class ModelIntrospection {
           hasAttr(arena, config, "vision_config") ||
             hasAttr(arena, config, "audio_config"),
           readTotalParams(arena, model),
-          readBytesPerParam(arena, config)
+          readBitsPerParam(arena, config)
         );
       } finally {
         PythonTypes.decref(config);
@@ -194,17 +203,20 @@ public final class ModelIntrospection {
    * back to whatever it can measure itself.
    */
   private static long readTotalParams(Arena arena, String model) {
+    if (java.nio.file.Files.isDirectory(java.nio.file.Path.of(model))) {
+      // A local directory is not a Hub repo: model_info can only fail, after
+      // a network timeout, on the one path most likely to be used offline.
+      return 0;
+    }
     MemorySegment hfApiClass = null;
     MemorySegment api = null;
     MemorySegment info = null;
     MemorySegment safetensors = null;
+    MemorySegment noArgs = null;
     try {
       hfApiClass = PythonCall.importClass(arena, "huggingface_hub", "HfApi");
-      api = PythonCall.pyObjectCall(
-        hfApiClass,
-        PythonCall.makeTuple(),
-        MemorySegment.NULL
-      );
+      noArgs = PythonCall.makeTuple();
+      api = PythonCall.pyObjectCall(hfApiClass, noArgs, MemorySegment.NULL);
       if (PythonTypes.isNull(api)) {
         CPythonBinding.PyErr_Clear();
         return 0;
@@ -239,6 +251,7 @@ public final class ModelIntrospection {
       if (safetensors != null) PythonTypes.decref(safetensors);
       if (info != null) PythonTypes.decref(info);
       if (api != null) PythonTypes.decref(api);
+      if (noArgs != null) PythonTypes.decref(noArgs);
       if (hfApiClass != null) PythonTypes.decref(hfApiClass);
     }
   }
@@ -251,17 +264,17 @@ public final class ModelIntrospection {
    * weights are 4-bit, and taking the dtype at face value would overstate the
    * weights by 4x.
    */
-  private static int readBytesPerParam(Arena arena, MemorySegment config) {
+  private static int readBitsPerParam(Arena arena, MemorySegment config) {
     int quantBits = readQuantizationBits(arena, config);
     if (quantBits > 0) {
-      return Math.max(quantBits / 8, 1);
+      return quantBits;
     }
     // "dtype" since transformers v5; "torch_dtype" before it.
     String dtype = strAttr(arena, config, "dtype");
     if (dtype.isEmpty()) {
       dtype = strAttr(arena, config, "torch_dtype");
     }
-    return bytesForDtype(dtype);
+    return bitsForDtype(dtype);
   }
 
   /** Bits per weight from {@code quantization_config.bits}, or 0 when unquantized. */
@@ -305,16 +318,16 @@ public final class ModelIntrospection {
   }
 
   /** Maps a torch dtype name to its width in bytes. 0 when unrecognised. */
-  private static int bytesForDtype(String dtype) {
+  private static int bitsForDtype(String dtype) {
     String normalized = dtype.toLowerCase(Locale.ENGLISH);
     if (
       normalized.contains("float32") || normalized.contains("int32")
-    ) return 4;
+    ) return 32;
     if (
       normalized.contains("bfloat16") || normalized.contains("float16")
-    ) return 2;
-    if (normalized.contains("int16")) return 2;
-    if (normalized.contains("float8") || normalized.contains("int8")) return 1;
+    ) return 16;
+    if (normalized.contains("int16")) return 16;
+    if (normalized.contains("float8") || normalized.contains("int8")) return 8;
     return 0;
   }
 
