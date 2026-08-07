@@ -238,12 +238,18 @@ sys.exit(0 if m.version('vllm').split('+')[0] == '${VLLM_VERSION}' else 1)
   # CPU index and platform markers that select torch==2.11.0+cpu on Linux and
   # plain 2.11.0 on Darwin. Installing it into the venv and then building with
   # --no-build-isolation makes the build use that torch instead of re-resolving.
+  # vLLM 0.26.0 dropped the "--extra-index-url https://download.pytorch.org/whl/cpu"
+  # line from its cpu requirements files (its own CI passes the index
+  # externally), but the files still pin torch==X+cpu on Linux — a local
+  # version that only exists on the PyTorch index. Supply it here.
   "$UV_BIN" pip install --python "$VENV_PYTHON" \
     -r "${VLLM_SRC}/requirements/build/cpu.txt" \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
     --index-strategy unsafe-best-match
 
   "$UV_BIN" pip install --python "$VENV_PYTHON" \
     -r "${VLLM_SRC}/requirements/cpu.txt" \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
     --index-strategy unsafe-best-match
 
   # Explicit rather than inferred: setup.py defaults to a CUDA build on Linux,
