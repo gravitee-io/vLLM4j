@@ -529,10 +529,27 @@ jobs:
       - install_dependencies_jextract
       - maven_deploy_nexus
 
+  update_vllm:
+    executor: ubuntu_linux_x86_64
+    environment:
+      HOME_DIR: "/home/circleci"
+      LC_ALL: C.UTF-8
+      LANG: C.UTF-8
+    steps:
+      - install_dependencies
+      - checkout:
+          path: "/home/circleci/vLLM4j"
+      - git_config
+      - git_auth
+      - gh/setup
+      - run:
+          name: Update vLLM version
+          command: bash $HOME_DIR/vLLM4j/scripts/update_vllm_version.sh
+
 parameters:
   gio_action:
     type: enum
-    enum: [push_commit]
+    enum: [push_commit, update_libraries]
     default: push_commit
     description: ""
 
@@ -610,5 +627,30 @@ workflows:
           name: Maven Deploy on Nexus
           requires:
             - Release Tag
+          context:
+            - cicd-orchestrator
+
+  # Manual trigger: gio_action=update_libraries on main
+  update_vllm:
+    when:
+      and:
+        - equal: [update_libraries, << pipeline.parameters.gio_action >>]
+        - equal: ["main", << pipeline.git.branch >>]
+    jobs:
+      - update_vllm:
+          context:
+            - cicd-orchestrator
+
+  # Monthly: open a PR bumping vLLM to the latest stable release
+  monthly-library-update:
+    triggers:
+      - schedule:
+          cron: "0 10 5 * *"
+          filters:
+            branches:
+              only:
+                - main
+    jobs:
+      - update_vllm:
           context:
             - cicd-orchestrator
