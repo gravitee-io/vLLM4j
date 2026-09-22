@@ -490,17 +490,7 @@ public final class VllmEngine implements AutoCloseable {
     List<RequestOutput> finished
   ) {}
 
-  /** Python source of the packing helper. Defined once, called once per step. */
-  /**
-   * vLLM 0.28.0's {@code cleanup_dist_env_and_memory()} (run from
-   * {@code EngineCore.shutdown()}) calls
-   * {@code torch.accelerator.empty_host_cache()} on every non-CPU platform.
-   * On MPS (torch 2.13.0) that call segfaults inside
-   * {@code at::accelerator::emptyHostCache()} — reproducible in plain Python
-   * with just {@code import torch; torch.accelerator.empty_host_cache()}.
-   * There is no pinned-host-memory cache to release on Metal anyway, so the
-   * call is replaced with a no-op before teardown runs.
-   */
+  /** No-ops torch.accelerator.empty_host_cache(), which segfaults on MPS at vLLM 0.28.0 teardown. */
   private static final String METAL_SHUTDOWN_PATCH_SOURCE = """
     import torch
     if getattr(torch.accelerator, "empty_host_cache", None) is not None:
@@ -509,6 +499,7 @@ public final class VllmEngine implements AutoCloseable {
         torch.accelerator.empty_host_cache = __vllm4j_empty_host_cache_noop
     """;
 
+  /** Python source of the packing helper. Defined once, called once per step. */
   private static final String PACK_SOURCE = """
     def __vllm4j_pack(engine):
         fast = []
@@ -1573,10 +1564,7 @@ public final class VllmEngine implements AutoCloseable {
     }
   }
 
-  /**
-   * Executes {@link #METAL_SHUTDOWN_PATCH_SOURCE}. Best-effort: a failure here
-   * only means teardown proceeds unpatched.
-   */
+  /** Executes {@link #METAL_SHUTDOWN_PATCH_SOURCE}; best-effort, failures are logged and ignored. */
   private void disableHostCacheReleaseOnMetal() {
     try {
       MemorySegment builtins = PythonCall.importClass(
