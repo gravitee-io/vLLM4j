@@ -271,7 +271,7 @@ case "$BACKEND" in
     # Install prebuilt vllm-metal wheel from GitHub release (includes Metal kernels compiled and ready to use)
     echo "Installing vllm-metal (prebuilt wheel) ..."
     "$UV_BIN" pip install --python "$VENV_PYTHON" \
-      "https://github.com/vllm-project/vllm-metal/releases/download/v0.3.0.dev20260616093506/vllm_metal-0.3.0.dev20260616093506-cp312-cp312-macosx_11_0_arm64.whl"
+      "https://github.com/vllm-project/vllm-metal/releases/download/v0.28.0/vllm_metal-0.28.0-cp312-cp312-macosx_15_0_arm64.whl"
 
     install_common
     ;;
