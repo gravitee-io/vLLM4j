@@ -36,7 +36,7 @@ BACKEND=""
 VLLM_VERSION="0.28.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
 # See install_common() — newer xgrammar segfaults on import.
 XGRAMMAR_VERSION="0.2.2"
-TVM_FFI_VERSION="0.1.12"
+TVM_FFI_VERSION="0.1.11"
 
 print_usage() {
   echo "Usage: $0 -d <project_dir> -v <python_version> -b <backend>"
@@ -129,7 +129,7 @@ install_common() {
   # taking the whole process down (exit 139) before any vLLM code runs. It is
   # not JVM-specific — a plain `python -c "from vllm import LLM"` crashes too.
   #
-  # 0.2.2/0.1.12 is the last combination verified to import cleanly. Revisit
+  # 0.2.2/0.1.11 is the last combination verified to import cleanly. Revisit
   # when bumping VLLM_VERSION; xgrammar is only used for guided decoding, which
   # vLLM4j does not currently expose.
   "$UV_BIN" pip install --python "$VENV_PYTHON" \
