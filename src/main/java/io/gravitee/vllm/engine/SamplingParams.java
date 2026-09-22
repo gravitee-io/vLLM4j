@@ -449,8 +449,7 @@ public final class SamplingParams implements AutoCloseable, Freeable {
     checkNotBuilt();
     try (var gil = GIL.acquire()) {
       MemorySegment pyGuided = params.toPython(arena);
-      // `structured_outputs` since vLLM 0.21 (renamed from `guided_decoding`);
-      // this project pins 0.23, so the old name is not supported.
+      // `structured_outputs` since vLLM 0.21 (renamed from `guided_decoding`).
       PythonTypes.putDictObj(arena, kwargs, "structured_outputs", pyGuided);
       PythonTypes.decref(pyGuided);
     }

@@ -130,8 +130,8 @@ install_common() {
   # not JVM-specific — a plain `python -c "from vllm import LLM"` crashes too.
   #
   # 0.2.2/0.1.11 is the last combination verified to import cleanly. Revisit
-  # when bumping VLLM_VERSION; xgrammar is only used for guided decoding, which
-  # vLLM4j does not currently expose.
+  # when bumping VLLM_VERSION; xgrammar backs GuidedDecodingParams, so
+  # GuidedDecodingTest must pass on the new pair.
   "$UV_BIN" pip install --python "$VENV_PYTHON" \
     "xgrammar==${XGRAMMAR_VERSION}" "apache-tvm-ffi==${TVM_FFI_VERSION}"
 }

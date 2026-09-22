@@ -184,9 +184,7 @@ public final class GuidedDecodingParams {
       }
     }
 
-    // StructuredOutputsParams since vLLM 0.21 (renamed from
-    // GuidedDecodingParams); this project pins 0.23, so the old class is not
-    // supported.
+    // StructuredOutputsParams since vLLM 0.21 (renamed from GuidedDecodingParams).
     MemorySegment guidedClass = PythonCall.importClass(
       arena,
       "vllm.sampling_params",
