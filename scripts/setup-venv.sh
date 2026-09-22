@@ -33,10 +33,10 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_BASEDIR:-.}"
 PYTHON_VERSION="3.12"
 BACKEND=""
-VLLM_VERSION="0.26.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
+VLLM_VERSION="0.28.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
 # See install_common() — newer xgrammar segfaults on import.
 XGRAMMAR_VERSION="0.2.2"
-TVM_FFI_VERSION="0.1.12"
+TVM_FFI_VERSION="0.1.11"
 
 print_usage() {
   echo "Usage: $0 -d <project_dir> -v <python_version> -b <backend>"
@@ -116,7 +116,7 @@ VENV_PYTHON="${VENV_DIR}/bin/python"
 
 install_common() {
   # jinja2 is the only dependency vLLM does not pull in transitively.
-  # ninja, setuptools, and transformers are all bundled by vllm>=0.26.0.
+  # ninja, setuptools, and transformers are all bundled by vllm>=0.28.0.
   "$UV_BIN" pip install --python "$VENV_PYTHON" jinja2
 
   # Pin xgrammar and its tvm-ffi runtime.
@@ -129,9 +129,9 @@ install_common() {
   # taking the whole process down (exit 139) before any vLLM code runs. It is
   # not JVM-specific — a plain `python -c "from vllm import LLM"` crashes too.
   #
-  # 0.2.2/0.1.12 is the last combination verified to import cleanly. Revisit
-  # when bumping VLLM_VERSION; xgrammar is only used for guided decoding, which
-  # vLLM4j does not currently expose.
+  # 0.2.2/0.1.11 is the last combination verified to import cleanly. Revisit
+  # when bumping VLLM_VERSION; xgrammar backs GuidedDecodingParams, so
+  # GuidedDecodingTest must pass on the new pair.
   "$UV_BIN" pip install --python "$VENV_PYTHON" \
     "xgrammar==${XGRAMMAR_VERSION}" "apache-tvm-ffi==${TVM_FFI_VERSION}"
 }
@@ -187,7 +187,7 @@ align_cuda_toolchain() {
 # published `vllm` wheel is CUDA-only — installing it on a machine without a GPU
 # leaves `current_platform.device_type` empty and every engine construction dies
 # with "Device string must not be empty". Compiling from source with
-# VLLM_TARGET_DEVICE=cpu produces a genuine CPU build (`0.26.0+cpu`).
+# VLLM_TARGET_DEVICE=cpu produces a genuine CPU build (`0.28.0+cpu`).
 #
 # For metal this provides the core that the vllm-metal plugin sits on top of;
 # for cpu it is the whole thing.
@@ -195,7 +195,7 @@ align_cuda_toolchain() {
 # Needs a C/C++ toolchain (build-essential / Xcode CLT) to compile the CPU
 # kernels.
 install_vllm_from_source() {
-  # importlib reports the *local* version (e.g. "0.26.0+cpu"), so compare only
+  # importlib reports the *local* version (e.g. "0.28.0+cpu"), so compare only
   # the part before "+" — otherwise this never matches and every run rebuilds.
   if "$VENV_PYTHON" -c "
 import importlib.metadata as m, sys
@@ -238,7 +238,7 @@ sys.exit(0 if m.version('vllm').split('+')[0] == '${VLLM_VERSION}' else 1)
   # CPU index and platform markers that select torch==2.11.0+cpu on Linux and
   # plain 2.11.0 on Darwin. Installing it into the venv and then building with
   # --no-build-isolation makes the build use that torch instead of re-resolving.
-  # vLLM 0.26.0 dropped the "--extra-index-url https://download.pytorch.org/whl/cpu"
+  # vLLM 0.28.0 dropped the "--extra-index-url https://download.pytorch.org/whl/cpu"
   # line from its cpu requirements files (its own CI passes the index
   # externally), but the files still pin torch==X+cpu on Linux — a local
   # version that only exists on the PyTorch index. Supply it here.
@@ -271,7 +271,7 @@ case "$BACKEND" in
     # Install prebuilt vllm-metal wheel from GitHub release (includes Metal kernels compiled and ready to use)
     echo "Installing vllm-metal (prebuilt wheel) ..."
     "$UV_BIN" pip install --python "$VENV_PYTHON" \
-      "https://github.com/vllm-project/vllm-metal/releases/download/v0.3.0.dev20260616093506/vllm_metal-0.3.0.dev20260616093506-cp312-cp312-macosx_11_0_arm64.whl"
+      "https://github.com/vllm-project/vllm-metal/releases/download/v0.28.0/vllm_metal-0.28.0-cp312-cp312-macosx_15_0_arm64.whl"
 
     install_common
     ;;
@@ -327,7 +327,7 @@ case "$BACKEND" in
     # declaring it fine.
     CURRENT_CUDA_MAJOR="$("$VENV_PYTHON" -c \
       'import torch; print((torch.version.cuda or "").split(".")[0])' 2>/dev/null || true)"
-    # split('+') drops the local build tag: the cu129 wheel reports "0.26.0+cu129".
+    # split('+') drops the local build tag: the cu129 wheel reports "0.28.0+cu129".
     CURRENT_VLLM_VERSION="$("$VENV_PYTHON" -c \
       "import importlib.metadata as m; print(m.version('vllm').split('+')[0])" 2>/dev/null || true)"
 

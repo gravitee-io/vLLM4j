@@ -490,6 +490,15 @@ public final class VllmEngine implements AutoCloseable {
     List<RequestOutput> finished
   ) {}
 
+  /** No-ops torch.accelerator.empty_host_cache(), which segfaults on MPS at vLLM 0.28.0 teardown. */
+  private static final String METAL_SHUTDOWN_PATCH_SOURCE = """
+    import torch
+    if getattr(torch.accelerator, "empty_host_cache", None) is not None:
+        def __vllm4j_empty_host_cache_noop(*args, **kwargs):
+            return None
+        torch.accelerator.empty_host_cache = __vllm4j_empty_host_cache_noop
+    """;
+
   /** Python source of the packing helper. Defined once, called once per step. */
   private static final String PACK_SOURCE = """
     def __vllm4j_pack(engine):
@@ -1306,6 +1315,9 @@ public final class VllmEngine implements AutoCloseable {
       } else {
         // ── Non-CUDA teardown (Metal, CPU): standard cleanup ─────────
         // No CuMemAllocator on these platforms — safe to decref + gc.
+        if (PlatformResolver.backend() == VllmBackend.METAL) {
+          disableHostCacheReleaseOnMetal();
+        }
         System.out.println("[vLLM4j] close: calling shutdownEngineCore()");
         System.out.flush();
         shutdownEngineCore();
@@ -1549,6 +1561,43 @@ public final class VllmEngine implements AutoCloseable {
       System.out.println("[vLLM4j] sleepEngine: EXCEPTION — " + e.getMessage());
       System.out.flush();
       CPythonBinding.PyErr_Clear();
+    }
+  }
+
+  /** Executes {@link #METAL_SHUTDOWN_PATCH_SOURCE}; best-effort, failures are logged and ignored. */
+  private void disableHostCacheReleaseOnMetal() {
+    try {
+      MemorySegment builtins = PythonCall.importClass(
+        arena,
+        "builtins",
+        "exec"
+      );
+      MemorySegment namespace = CPythonBinding.PyDict_New();
+      MemorySegment source = PythonTypes.pyStr(
+        arena,
+        METAL_SHUTDOWN_PATCH_SOURCE
+      );
+      MemorySegment args = PythonCall.makeTuple(source, namespace);
+      MemorySegment ignored = PythonCall.pyObjectCall(
+        builtins,
+        args,
+        MemorySegment.NULL
+      );
+      PythonErrors.checkPythonError("exec(metal shutdown patch)");
+      PythonTypes.decref(ignored);
+      PythonTypes.decref(args);
+      PythonTypes.decref(source);
+      PythonTypes.decref(namespace);
+      PythonTypes.decref(builtins);
+      System.out.println(
+        "[vLLM4j] close: torch.accelerator.empty_host_cache() disabled on Metal"
+      );
+      System.out.flush();
+    } catch (Exception e) {
+      System.out.println(
+        "[vLLM4j] close: metal shutdown patch failed (ignored): " + e
+      );
+      System.out.flush();
     }
   }
 
