@@ -269,9 +269,11 @@ case "$BACKEND" in
     install_vllm_from_source
 
     # Install prebuilt vllm-metal wheel from GitHub release (includes Metal kernels compiled and ready to use)
+    # vllm-metal has no v0.31.0 release yet, so this pins its v0.31.0 dev pre-release;
+    # move back to the stable tag once it ships.
     echo "Installing vllm-metal (prebuilt wheel) ..."
     "$UV_BIN" pip install --python "$VENV_PYTHON" \
-      "https://github.com/vllm-project/vllm-metal/releases/download/v0.31.0/vllm_metal-0.31.0-cp312-cp312-macosx_15_0_arm64.whl"
+      "https://github.com/vllm-project/vllm-metal/releases/download/v0.31.0.dev20261007095912/vllm_metal-0.31.0.dev20261007095912-cp312-cp312-macosx_15_0_arm64.whl"
 
     install_common
     ;;
