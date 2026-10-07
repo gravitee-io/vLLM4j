@@ -211,7 +211,7 @@ commands:
           name: Generate sources (<< parameters.os >>-<< parameters.platform >>)
           command: |
             cd $HOME_DIR/vLLM4j
-            cp /tmp/.gravitee.settings.xml .
+            cp /tmp/.gravitee.azure.settings.xml .
 
             if [[ << parameters.os >> == "macosx" ]]; then
               source ~/.zprofile
@@ -219,7 +219,7 @@ commands:
               source $BASH_ENV
             fi
 
-            mvn -s .gravitee.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+            mvn -s .gravitee.azure.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
       - when:
           condition:
             equal: ["linux", << parameters.os >>]
@@ -262,7 +262,7 @@ commands:
             MAVEN_OPTS: "-Xmx8g -Xms2g"
           command: |
             cd $HOME_DIR/vLLM4j
-            cp /tmp/.gravitee.settings.xml .
+            cp /tmp/.gravitee.azure.settings.xml .
 
             if [[ << parameters.os >> == "macosx" ]]; then
               source ~/.zprofile
@@ -270,8 +270,8 @@ commands:
               source $BASH_ENV
             fi
 
-            mvn -s .gravitee.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
-            mvn -s .gravitee.settings.xml install -DskipTests=false
+            mvn -s .gravitee.azure.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+            mvn -s .gravitee.azure.settings.xml install -DskipTests=false
       - when:
           condition: << parameters.run_integration >>
           steps:
@@ -289,7 +289,7 @@ commands:
                     source $BASH_ENV
                   fi
 
-                  mvn -s .gravitee.settings.xml test -Pintegration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+                  mvn -s .gravitee.azure.settings.xml test -Pintegration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
       - when:
           condition: << parameters.run_vlm_integration >>
           steps:
@@ -307,7 +307,7 @@ commands:
                     source $BASH_ENV
                   fi
 
-                  mvn -s .gravitee.settings.xml test -Pvlm-integration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+                  mvn -s .gravitee.azure.settings.xml test -Pvlm-integration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
 
   release_tag:
     steps:
@@ -356,7 +356,7 @@ commands:
           name: Maven Deploy
           command: |
             cd $HOME_DIR/vLLM4j/
-            mvn -s .gravitee.settings.xml -B -P gio-artifactory-release,gio-release deploy -DskipTests=true
+            mvn -s .gravitee.azure.settings.xml -B -P gio-artifactory-release,gio-release deploy -DskipTests=true
 
   maven_deploy_azure:
     steps:
@@ -403,19 +403,13 @@ jobs:
     resource_class: small
     steps:
       - keeper/env-export:
-          secret-url: keeper://7CgijuGiFDSLynRJt1Dm9w/custom_field/xml
-          var-name: MAVEN_SETTINGS
-      - keeper/env-export:
           secret-url: keeper://7CgijuGiFDSLynRJt1Dm9w/custom_field/xml_azure
           var-name: MAVEN_AZURE_SETTINGS
       - run:
-          command: |
-            echo $MAVEN_SETTINGS > .gravitee.settings.xml
-            echo $MAVEN_AZURE_SETTINGS > .gravitee.azure.settings.xml
+          command: echo $MAVEN_AZURE_SETTINGS > .gravitee.azure.settings.xml
       - persist_to_workspace:
           root: .
           paths:
-            - .gravitee.settings.xml
             - .gravitee.azure.settings.xml
 
   # ── Build & Test (non-main branches) ─────────────────────────────────────
