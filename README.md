@@ -68,6 +68,19 @@ java -Dvllm4j.venv=.venv \
 
 ## Usage as a library
 
+> [!IMPORTANT]
+> vLLM4j is no longer published to Maven Central, and we are working on a new way to distribute it. In the meantime, build it from source and run `mvn install` with the profiles from [Quick start](#quick-start), then depend on it from your local Maven repository:
+>
+> ```xml
+> <dependency>
+>     <groupId>io.gravitee.vllm</groupId>
+>     <artifactId>vLLM4j</artifactId>
+>     <version><!-- the <version> in this repository's pom.xml --></version>
+> </dependency>
+> ```
+>
+> To serve models rather than embed the library, try [Gravitee Singularitee](https://github.com/gravitee-io/gravitee-singularitee) locally: an inference server that runs vLLM through vLLM4j (opt-in, Linux/CUDA first). See its [Getting started](https://github.com/gravitee-io/gravitee-singularitee/blob/main/docs/getting-started/README.md#vllm).
+
 ### Creating an engine
 
 ```java
