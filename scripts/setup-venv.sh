@@ -271,7 +271,8 @@ case "$BACKEND" in
     # Install prebuilt vllm-metal wheel from GitHub release (includes Metal kernels compiled and ready to use)
     # Resolved rather than pinned: before a stable vX.Y.Z tag ships, vllm-metal
     # only keeps its latest vX.Y.Z.dev pre-release, so a pinned dev URL 404s
-    # as soon as the next one is published.
+    # as soon as the next one is published. The URL carries GitHub's
+    # #sha256 digest, which uv checks the downloaded wheel against.
     VLLM_METAL_WHEEL="$("$(dirname "${BASH_SOURCE[0]}")/vllm_metal_wheel_url.sh" \
       -v "$VLLM_VERSION" -p "$PYTHON_VERSION")"
     echo "Installing vllm-metal (prebuilt wheel) from $VLLM_METAL_WHEEL ..."

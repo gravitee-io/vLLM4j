@@ -1,5 +1,7 @@
 # vLLM4j
 
+[![vLLM](https://img.shields.io/badge/vLLM-0.31.0-blue)](https://github.com/vllm-project/vllm/releases/tag/v0.31.0)
+
 JVM native binding for [vLLM](https://github.com/vllm-project/vllm) via Java FFM (Foreign Function & Memory API) and [jextract](https://jdk.java.net/jextract/).
 
 Embeds CPython in-process, drives vLLM's synchronous `LLMEngine` directly, and exposes Jinja2 chat-template rendering -- all without HTTP, Ray, or `AsyncLLMEngine`.

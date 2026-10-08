@@ -16,7 +16,8 @@
 #
 
 #
-# Prints the download URL of the newest vllm-metal wheel for a vLLM version.
+# Prints the download URL of the newest vllm-metal wheel for a vLLM version,
+# with GitHub's sha256 for it appended as #sha256=<hex>.
 #
 # vllm-metal tracks vLLM's version numbers. Until the stable vX.Y.Z tag ships
 # it only publishes vX.Y.Z.dev<timestamp> pre-releases, and it keeps just the
@@ -33,6 +34,12 @@
 #
 # The URL goes to stdout, diagnostics to stderr. The releases are public, so
 # the API is queried anonymously — no token is ever sent.
+#
+# uv only verifies a direct-URL wheel when the URL carries a hash: unlike an
+# index, a GitHub download gives it nothing to compare against. With the
+# #sha256 fragment, uv refuses a wheel whose bytes differ from the digest
+# GitHub recorded at upload. A wheel without a digest is refused here rather
+# than installed unchecked.
 #
 
 set -euo pipefail
@@ -65,17 +72,33 @@ PY_TAG="cp${PYTHON_VERSION//./}"
 
 # Plain grep over the JSON rather than jq: this runs from setup-venv.sh on CI
 # images that only guarantee curl. browser_download_url is the one field that
-# carries both the release tag and the wheel filename.
+# carries both the release tag and the wheel filename; each asset lists its
+# digest before it, so the awk pairs every URL with the digest just read and
+# emits "<url>#sha256=<hex>" (or the bare URL when GitHub has no digest).
 URLS="$(curl -fsSL -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${REPO}/releases?per_page=100" \
-  | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+\.whl"' \
-  | sed -E 's/.*"(https:[^"]+)"$/\1/' \
+  | grep -oE '"digest"[[:space:]]*:[[:space:]]*(null|"sha256:[0-9a-f]{64}")|"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
+  | awk '
+      /^"digest"/ { digest = ""; if (match($0, /sha256:[0-9a-f]+/)) digest = substr($0, RSTART + 7, RLENGTH - 7); next }
+      {
+        url = $0; sub(/^"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", url); sub(/"$/, "", url)
+        print (digest == "" ? url : url "#sha256=" digest); digest = ""
+      }' \
+  | grep -E '\.whl(#|$)' \
   | grep -F -- "-${PY_TAG}-${PY_TAG}-" || true)"
 
-# Escape the dots so 0.31.0 cannot match 0x31y0.
+# Escape the dots so a version like 1.2.3 cannot match 1x2y3.
 VERSION_RE="${VERSION//./\\.}"
+
+require_digest() {
+  if [[ "$1" != *"#sha256="* ]]; then
+    echo "ERROR: GitHub has no sha256 digest for ${1} — refusing to install it unverified." >&2
+    exit 1
+  fi
+}
 
 STABLE="$(grep -E "/download/v${VERSION_RE}/" <<<"$URLS" | head -1 || true)"
 if [[ -n "$STABLE" ]]; then
+  require_digest "$STABLE"
   echo "Found stable vllm-metal v${VERSION}." >&2
   echo "$STABLE"
   exit 0
@@ -87,6 +110,7 @@ PRE="$(grep -E "/download/v${VERSION_RE}\.?(dev|rc)[0-9]+/" <<<"$URLS" \
   | awk -F/ '{ print $(NF-1) " " $0 }' \
   | sort -V -k1,1 | tail -1 | cut -d' ' -f2- || true)"
 if [[ -n "$PRE" ]]; then
+  require_digest "$PRE"
   echo "No stable vllm-metal v${VERSION} yet — using pre-release $(basename "$(dirname "$PRE")")." >&2
   echo "$PRE"
   exit 0
