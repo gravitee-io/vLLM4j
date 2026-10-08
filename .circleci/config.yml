@@ -2,7 +2,7 @@ version: 2.1
 
 orbs:
   gh: circleci/github-cli@2.7.2
-  keeper: gravitee-io/keeper@0.7.0
+  keeper: gravitee-io/keeper@0.7.2
 
 executors:
   macos-executor:
@@ -211,7 +211,7 @@ commands:
           name: Generate sources (<< parameters.os >>-<< parameters.platform >>)
           command: |
             cd $HOME_DIR/vLLM4j
-            cp /tmp/.gravitee.settings.xml .
+            cp /tmp/.gravitee.azure.settings.xml .
 
             if [[ << parameters.os >> == "macosx" ]]; then
               source ~/.zprofile
@@ -219,7 +219,7 @@ commands:
               source $BASH_ENV
             fi
 
-            mvn -s .gravitee.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+            mvn -s .gravitee.azure.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
       - when:
           condition:
             equal: ["linux", << parameters.os >>]
@@ -262,7 +262,7 @@ commands:
             MAVEN_OPTS: "-Xmx8g -Xms2g"
           command: |
             cd $HOME_DIR/vLLM4j
-            cp /tmp/.gravitee.settings.xml .
+            cp /tmp/.gravitee.azure.settings.xml .
 
             if [[ << parameters.os >> == "macosx" ]]; then
               source ~/.zprofile
@@ -270,8 +270,8 @@ commands:
               source $BASH_ENV
             fi
 
-            mvn -s .gravitee.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
-            mvn -s .gravitee.settings.xml install -DskipTests=false
+            mvn -s .gravitee.azure.settings.xml clean generate-sources -P<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+            mvn -s .gravitee.azure.settings.xml install -DskipTests=false
       - when:
           condition: << parameters.run_integration >>
           steps:
@@ -289,7 +289,7 @@ commands:
                     source $BASH_ENV
                   fi
 
-                  mvn -s .gravitee.settings.xml test -Pintegration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+                  mvn -s .gravitee.azure.settings.xml test -Pintegration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
       - when:
           condition: << parameters.run_vlm_integration >>
           steps:
@@ -307,7 +307,7 @@ commands:
                     source $BASH_ENV
                   fi
 
-                  mvn -s .gravitee.settings.xml test -Pvlm-integration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+                  mvn -s .gravitee.azure.settings.xml test -Pvlm-integration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
 
   release_tag:
     steps:
@@ -330,7 +330,7 @@ commands:
               conventional-changelog-conventionalcommits \
       - run:
           name: Tag release version
-          command: bash -x $HOME_DIR/vLLM4j/scripts/release_tag.sh
+          command: bash $HOME_DIR/vLLM4j/scripts/release_tag.sh
       - persist_to_workspace:
           root: "/home/circleci/"
           paths: ["vLLM4j"]
@@ -356,18 +356,34 @@ commands:
           name: Maven Deploy
           command: |
             cd $HOME_DIR/vLLM4j/
-            mvn -s .gravitee.settings.xml -B -P gio-artifactory-release,gio-release deploy -DskipTests=true
+            mvn -s .gravitee.azure.settings.xml -B -P gio-artifactory-release,gio-release deploy -DskipTests=true
 
-  maven_deploy_nexus:
+  maven_deploy_azure:
     steps:
       - attach_workspace:
           at: .
       - prepare-gpg
+      - keeper/install
       - run:
           name: Maven Deploy
           command: |
+            CLIENT_ID=$(ksm secret notation keeper://UryantA7MvZe8fkWwcUt8g/field/login)
+            CLIENT_SECRET=$(ksm secret notation keeper://UryantA7MvZe8fkWwcUt8g/field/password)
+            TENANT=$(ksm secret notation keeper://UryantA7MvZe8fkWwcUt8g/custom_field/tenant)
+
+            # The service principal's token lives one hour, so fetch it in the job that uses it.
+            # --data-urlencode, not -d: Entra secrets often contain + & = that -d would mangle.
+            AZURE_ARTIFACTS_PAT=$(curl -sS --fail-with-body --max-time 30 -X POST \
+              "https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token" \
+              --data-urlencode "client_id=${CLIENT_ID}" \
+              --data-urlencode "client_secret=${CLIENT_SECRET}" \
+              --data-urlencode "scope=499b84ac-1321-427f-aa17-267ca6975798/.default" \
+              --data-urlencode "grant_type=client_credentials" | jq -r .access_token)
+            export AZURE_ARTIFACTS_PAT
+
             cd $HOME_DIR/vLLM4j/
-            mvn deploy -DskipTests -Dskip.validation --no-transfer-progress -s .gravitee.settings.xml -P gravitee-release
+            mvn deploy -DskipTests -Dskip.validation --no-transfer-progress -s .gravitee.azure.settings.xml \
+              -DaltDeploymentRepository=azure-artifacts-gravitee::default::https://pkgs.dev.azure.com/graviteeio/packages/_packaging/gravitee/maven/v1
 
   prepare-gpg:
     description: Prepare GPG command
@@ -387,15 +403,16 @@ jobs:
       - image: "cimg/base:stable"
     resource_class: small
     steps:
-      - keeper/env-export:
-          secret-url: keeper://7CgijuGiFDSLynRJt1Dm9w/custom_field/xml
-          var-name: MAVEN_SETTINGS
+      - keeper/install
       - run:
-          command: echo $MAVEN_SETTINGS > .gravitee.settings.xml
+          name: Write Maven settings
+          # Straight to the file: env-export's unquoted heredoc expands the ${env.*} placeholders
+          # the settings hold, which fails with a bad substitution and prints them into the log.
+          command: ksm secret notation keeper://7CgijuGiFDSLynRJt1Dm9w/custom_field/xml_azure > .gravitee.azure.settings.xml
       - persist_to_workspace:
           root: .
           paths:
-            - .gravitee.settings.xml
+            - .gravitee.azure.settings.xml
 
   # ── Build & Test (non-main branches) ─────────────────────────────────────
 
@@ -517,7 +534,7 @@ jobs:
       - install_dependencies_jextract
       - maven_deploy_artifactory
 
-  maven_deploy_nexus:
+  maven_deploy_azure:
     executor: ubuntu_linux_x86_64
     environment:
       HOME_DIR: "/home/circleci/"
@@ -527,7 +544,7 @@ jobs:
       - install_dependencies
       - install_java_dependencies
       - install_dependencies_jextract
-      - maven_deploy_nexus
+      - maven_deploy_azure
 
   update_vllm:
     executor: ubuntu_linux_x86_64
@@ -623,8 +640,8 @@ workflows:
             - Release Tag
           context:
             - cicd-orchestrator
-      - maven_deploy_nexus:
-          name: Maven Deploy on Nexus
+      - maven_deploy_azure:
+          name: Maven Deploy on Azure Artifacts
           requires:
             - Release Tag
           context:

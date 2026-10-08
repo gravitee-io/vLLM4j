@@ -1,5 +1,7 @@
 # vLLM4j
 
+[![vLLM](https://img.shields.io/badge/vLLM-0.31.0-blue)](https://github.com/vllm-project/vllm/releases/tag/v0.31.0)
+
 JVM native binding for [vLLM](https://github.com/vllm-project/vllm) via Java FFM (Foreign Function & Memory API) and [jextract](https://jdk.java.net/jextract/).
 
 Embeds CPython in-process, drives vLLM's synchronous `LLMEngine` directly, and exposes Jinja2 chat-template rendering -- all without HTTP, Ray, or `AsyncLLMEngine`.
@@ -17,7 +19,7 @@ Embeds CPython in-process, drives vLLM's synchronous `LLMEngine` directly, and e
 - **Continuous batching** -- multiple requests processed in parallel via `VllmIterator`
 - **Token classification** -- Java-side FSM detects reasoning (`<think>`) and tool-call tags in generated text
 
-> Targets **vLLM 0.28.0** across all backends. The version is pinned in `VLLM_VERSION` at the top of `scripts/setup-venv.sh`.
+> Targets **vLLM 0.31.0** across all backends. The version is pinned in `VLLM_VERSION` at the top of `scripts/setup-venv.sh`.
 
 ## Requirements
 
@@ -67,6 +69,19 @@ java -Dvllm4j.venv=.venv \
 ---
 
 ## Usage as a library
+
+> [!IMPORTANT]
+> vLLM4j is no longer published to Maven Central, and we are working on a new way to distribute it. In the meantime, build it from source and run `mvn install` with the profiles from [Quick start](#quick-start), then depend on it from your local Maven repository:
+>
+> ```xml
+> <dependency>
+>     <groupId>io.gravitee.vllm</groupId>
+>     <artifactId>vLLM4j</artifactId>
+>     <version><!-- the <version> in this repository's pom.xml --></version>
+> </dependency>
+> ```
+>
+> To serve models rather than embed the library, try [Gravitee Singularitee](https://github.com/gravitee-io/gravitee-singularitee) locally: an inference server that runs vLLM through vLLM4j (opt-in, Linux/CUDA first). See its [Getting started](https://github.com/gravitee-io/gravitee-singularitee/blob/main/docs/getting-started/README.md#vllm).
 
 ### Creating an engine
 
@@ -698,7 +713,7 @@ The following variables are set by the example launch scripts and are worth know
 | Variable | Recommended value | Why |
 |---|---|---|
 | `LD_PRELOAD` | `/path/to/.venv/lib/libpython3.12.so` (symlink created by the build) | Prevents `undefined symbol: PyTuple_Type` from Python extension modules (e.g. `_ctypes`) that are loaded after the JVM has already resolved libc symbols. Required on Linux. |
-| `VLLM4J_ATTENTION_BACKEND` | `TRITON_ATTN` | vLLM 0.28.0 no longer reads an attention-backend env var, so vLLM4j forwards this one (or the `-Dvllm4j.attentionBackend` system property) to the `attention_backend` engine arg. On GPUs with compute capability < 8.0 (e.g. RTX 2070 = sm75) vLLM auto-selects FlashInfer, whose paged-prefill kernel fails at runtime (`BatchPrefillWithPagedKVCache ... invalid argument`); set `TRITON_ATTN` on those cards. Honored on the CUDA backend only. |
+| `VLLM4J_ATTENTION_BACKEND` | `TRITON_ATTN` | vLLM 0.31.0 no longer reads an attention-backend env var, so vLLM4j forwards this one (or the `-Dvllm4j.attentionBackend` system property) to the `attention_backend` engine arg. On GPUs with compute capability < 8.0 (e.g. RTX 2070 = sm75) vLLM auto-selects FlashInfer, whose paged-prefill kernel fails at runtime (`BatchPrefillWithPagedKVCache ... invalid argument`); set `TRITON_ATTN` on those cards. Honored on the CUDA backend only. |
 | `TOKENIZERS_PARALLELISM` | `false` | Suppresses the HuggingFace tokenizers deadlock warning that is emitted when the tokenizer is used in a forked subprocess. |
 | `VLLM_LOGGING_LEVEL` | `WARNING` | vLLM's Python side logs at `INFO` by default, producing verbose scheduler and profiling output on every request. `WARNING` keeps the Java log clean. |
 | `VLLM_WORKER_MULTIPROC_METHOD` | `spawn` | Ensures GPU worker processes are started with `spawn` rather than `fork`. Forking after `torch.cuda.init()` causes NCCL deadlocks in multi-GPU setups. |

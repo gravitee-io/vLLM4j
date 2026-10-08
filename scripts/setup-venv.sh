@@ -33,9 +33,9 @@ set -euo pipefail
 PROJECT_DIR="${PROJECT_BASEDIR:-.}"
 PYTHON_VERSION="3.12"
 BACKEND=""
-VLLM_VERSION="0.28.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
-# See install_common() — newer xgrammar segfaults on import.
-XGRAMMAR_VERSION="0.2.2"
+VLLM_VERSION="0.31.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
+# See install_common() — xgrammar 0.2.4 with tvm-ffi 0.1.13 segfaults on import.
+XGRAMMAR_VERSION="0.2.7"
 TVM_FFI_VERSION="0.1.11"
 
 print_usage() {
@@ -116,21 +116,23 @@ VENV_PYTHON="${VENV_DIR}/bin/python"
 
 install_common() {
   # jinja2 is the only dependency vLLM does not pull in transitively.
-  # ninja, setuptools, and transformers are all bundled by vllm>=0.28.0.
+  # ninja, setuptools, and transformers are all bundled by vllm>=0.31.0.
   "$UV_BIN" pip install --python "$VENV_PYTHON" jinja2
 
   # Pin xgrammar and its tvm-ffi runtime.
   #
-  # vLLM only asks for "xgrammar>=0.2.0,<1.0.0", so a fresh resolve picks up
-  # whatever is newest. xgrammar 0.2.4 (with apache-tvm-ffi 0.1.13) segfaults in
-  # its own static initialiser the moment `import vllm` loads it:
+  # vLLM pins xgrammar itself (==0.2.7 as of 0.31.0) but leaves apache-tvm-ffi
+  # floating, and the pair has crashed before: xgrammar 0.2.4 (with
+  # apache-tvm-ffi 0.1.13) segfaults in its own static initialiser the moment
+  # `import vllm` loads it:
   #   !!!!!!! Segfault encountered !!!!!!!
   #     TVMFFIEnvRegisterCAPI / xgrammar::__TVMFFIStaticInitFunc0()
   # taking the whole process down (exit 139) before any vLLM code runs. It is
   # not JVM-specific — a plain `python -c "from vllm import LLM"` crashes too.
   #
-  # 0.2.2/0.1.11 is the last combination verified to import cleanly. Revisit
-  # when bumping VLLM_VERSION; xgrammar backs GuidedDecodingParams, so
+  # 0.2.7/0.1.11 is verified to import and run structured output. Keep
+  # XGRAMMAR_VERSION equal to vLLM's own pin when bumping VLLM_VERSION, or
+  # `uv pip check` flags the venv; xgrammar backs GuidedDecodingParams, so
   # GuidedDecodingTest must pass on the new pair.
   "$UV_BIN" pip install --python "$VENV_PYTHON" \
     "xgrammar==${XGRAMMAR_VERSION}" "apache-tvm-ffi==${TVM_FFI_VERSION}"
@@ -187,7 +189,7 @@ align_cuda_toolchain() {
 # published `vllm` wheel is CUDA-only — installing it on a machine without a GPU
 # leaves `current_platform.device_type` empty and every engine construction dies
 # with "Device string must not be empty". Compiling from source with
-# VLLM_TARGET_DEVICE=cpu produces a genuine CPU build (`0.28.0+cpu`).
+# VLLM_TARGET_DEVICE=cpu produces a genuine CPU build (`0.31.0+cpu`).
 #
 # For metal this provides the core that the vllm-metal plugin sits on top of;
 # for cpu it is the whole thing.
@@ -195,7 +197,7 @@ align_cuda_toolchain() {
 # Needs a C/C++ toolchain (build-essential / Xcode CLT) to compile the CPU
 # kernels.
 install_vllm_from_source() {
-  # importlib reports the *local* version (e.g. "0.28.0+cpu"), so compare only
+  # importlib reports the *local* version (e.g. "0.31.0+cpu"), so compare only
   # the part before "+" — otherwise this never matches and every run rebuilds.
   if "$VENV_PYTHON" -c "
 import importlib.metadata as m, sys
@@ -238,7 +240,7 @@ sys.exit(0 if m.version('vllm').split('+')[0] == '${VLLM_VERSION}' else 1)
   # CPU index and platform markers that select torch==2.11.0+cpu on Linux and
   # plain 2.11.0 on Darwin. Installing it into the venv and then building with
   # --no-build-isolation makes the build use that torch instead of re-resolving.
-  # vLLM 0.28.0 dropped the "--extra-index-url https://download.pytorch.org/whl/cpu"
+  # vLLM 0.31.0 dropped the "--extra-index-url https://download.pytorch.org/whl/cpu"
   # line from its cpu requirements files (its own CI passes the index
   # externally), but the files still pin torch==X+cpu on Linux — a local
   # version that only exists on the PyTorch index. Supply it here.
@@ -269,9 +271,14 @@ case "$BACKEND" in
     install_vllm_from_source
 
     # Install prebuilt vllm-metal wheel from GitHub release (includes Metal kernels compiled and ready to use)
-    echo "Installing vllm-metal (prebuilt wheel) ..."
-    "$UV_BIN" pip install --python "$VENV_PYTHON" \
-      "https://github.com/vllm-project/vllm-metal/releases/download/v0.28.0/vllm_metal-0.28.0-cp312-cp312-macosx_15_0_arm64.whl"
+    # Resolved rather than pinned: before a stable vX.Y.Z tag ships, vllm-metal
+    # only keeps its latest vX.Y.Z.dev pre-release, so a pinned dev URL 404s
+    # as soon as the next one is published. The URL carries GitHub's
+    # #sha256 digest, which uv checks the downloaded wheel against.
+    VLLM_METAL_WHEEL="$("$(dirname "${BASH_SOURCE[0]}")/vllm_metal_wheel_url.sh" \
+      -v "$VLLM_VERSION" -p "$PYTHON_VERSION")"
+    echo "Installing vllm-metal (prebuilt wheel) from $VLLM_METAL_WHEEL ..."
+    "$UV_BIN" pip install --python "$VENV_PYTHON" "$VLLM_METAL_WHEEL"
 
     install_common
     ;;
@@ -327,13 +334,14 @@ case "$BACKEND" in
     # declaring it fine.
     CURRENT_CUDA_MAJOR="$("$VENV_PYTHON" -c \
       'import torch; print((torch.version.cuda or "").split(".")[0])' 2>/dev/null || true)"
-    # split('+') drops the local build tag: the cu129 wheel reports "0.28.0+cu129".
+    # split('+') drops the local build tag: the cu129 wheel reports "0.31.0+cu129".
     CURRENT_VLLM_VERSION="$("$VENV_PYTHON" -c \
       "import importlib.metadata as m; print(m.version('vllm').split('+')[0])" 2>/dev/null || true)"
 
     # Probe the compiled extension — `import vllm` sails past a broken one.
     # The 0.26 CUDA wheels ship it as _C_stable_libtorch; vllm._C is CPU-only now.
-    if "$VENV_PYTHON" -c "import vllm._C_stable_libtorch" &>/dev/null &&
+    # torchcodec links its own CUDA runtime, so it gets the same check.
+    if "$VENV_PYTHON" -c "import vllm._C_stable_libtorch, torchcodec" &>/dev/null &&
        [[ "$CURRENT_CUDA_MAJOR" == "$WANT_CUDA_MAJOR" &&
           "$CURRENT_VLLM_VERSION" == "$VLLM_VERSION" ]]; then
       echo "vllm ${VLLM_VERSION} already installed and built for CUDA ${CURRENT_CUDA_MAJOR} — skipping."
@@ -341,12 +349,14 @@ case "$BACKEND" in
       if [[ -n "$CURRENT_VLLM_VERSION" ]]; then
         if [[ "$CURRENT_VLLM_VERSION" != "$VLLM_VERSION" ]]; then
           echo "Upgrading venv: vllm ${CURRENT_VLLM_VERSION} installed, ${VLLM_VERSION} wanted."
-        elif "$VENV_PYTHON" -c "import vllm._C_stable_libtorch" &>/dev/null; then
+        elif ! "$VENV_PYTHON" -c "import vllm._C_stable_libtorch" &>/dev/null; then
+          echo "Repairing venv: vllm's compiled extension does not load — its CUDA runtime" \
+               "does not match torch (CUDA ${CURRENT_CUDA_MAJOR:-unknown})."
+        elif [[ "$CURRENT_CUDA_MAJOR" != "$WANT_CUDA_MAJOR" ]]; then
           echo "Repairing venv: torch targets CUDA ${CURRENT_CUDA_MAJOR:-unknown}," \
                "this driver needs CUDA ${WANT_CUDA_MAJOR}."
         else
-          echo "Repairing venv: vllm's compiled extension does not load — its CUDA runtime" \
-               "does not match torch (CUDA ${CURRENT_CUDA_MAJOR:-unknown})."
+          echo "Repairing venv: torchcodec does not load — it targets another CUDA than torch."
         fi
       fi
 
@@ -357,6 +367,12 @@ case "$BACKEND" in
       "$UV_BIN" pip install --python "$VENV_PYTHON" \
         --reinstall-package vllm --reinstall-package torch \
         "$VLLM_PACKAGE" --torch-backend="$TORCH_BACKEND"
+
+      # --torch-backend leaves torchcodec on PyPI, whose wheels are CUDA 13 builds.
+      if [[ "$TORCH_BACKEND" == "cu129" ]]; then
+        "$UV_BIN" pip install --python "$VENV_PYTHON" --reinstall-package torchcodec \
+          torchcodec --index-url https://download.pytorch.org/whl/cu129
+      fi
     fi
 
     install_common

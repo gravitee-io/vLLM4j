@@ -39,3 +39,7 @@ build/
 .venv/
 .jextract/
 .java-version
+
+# Maven settings written by CI (hold credentials)
+.gravitee.settings.xml
+.gravitee.azure.settings.xml

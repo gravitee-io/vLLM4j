@@ -22,6 +22,7 @@ UPSTREAM_REPO="vllm-project/vllm"
 PROJECT_DIR="$HOME_DIR/vLLM4j"
 SETUP_VENV_FILE="$PROJECT_DIR/scripts/setup-venv.sh"
 README_FILE="$PROJECT_DIR/README.md"
+METAL_WHEEL_FILE="$PROJECT_DIR/scripts/vllm_metal_wheel_url.sh"
 
 # --- Get latest stable vLLM version ---
 echo "Fetching latest vLLM release from GitHub..."
@@ -45,14 +46,19 @@ git checkout -b "$branch_name"
 
 # --- Update version in files ---
 # Blanket replace: the version appears in the VLLM_VERSION pin, in comments
-# documenting version-specific behaviour, and in the README target note.
+# documenting version-specific behaviour, in the README badges and target note,
+# and in the vllm-metal wheel script's usage example. vllm_metal_wheel_url.sh
+# itself takes the version from VLLM_VERSION, so the pin is all it needs.
+# Escape the dots so 0.31.0 cannot also match 0x31y0.
 echo "Updating versions from $OLD_VLLM_VERSION to $NEW_VLLM_VERSION..."
-sed -i'' -E "s/$OLD_VLLM_VERSION/$NEW_VLLM_VERSION/g" "$SETUP_VENV_FILE"
-sed -i'' -E "s/$OLD_VLLM_VERSION/$NEW_VLLM_VERSION/g" "$README_FILE"
+OLD_VLLM_VERSION_RE="${OLD_VLLM_VERSION//./\\.}"
+for file in "$SETUP_VENV_FILE" "$README_FILE" "$METAL_WHEEL_FILE"; do
+  sed -i'' -E "s/$OLD_VLLM_VERSION_RE/$NEW_VLLM_VERSION/g" "$file"
+done
 
 # --- Commit and push changes ---
 echo "Committing and pushing changes..."
-git add "$SETUP_VENV_FILE" "$README_FILE"
+git add "$SETUP_VENV_FILE" "$README_FILE" "$METAL_WHEEL_FILE"
 
 TITLE="feat(deps): update vLLM from $OLD_VLLM_VERSION to $NEW_VLLM_VERSION"
 git commit -m "$TITLE"
