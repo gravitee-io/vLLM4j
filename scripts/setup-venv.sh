@@ -34,8 +34,8 @@ PROJECT_DIR="${PROJECT_BASEDIR:-.}"
 PYTHON_VERSION="3.12"
 BACKEND=""
 VLLM_VERSION="0.31.0"  # minimum version floor; CUDA/CPU pull latest nightly >= this
-# See install_common() — newer xgrammar segfaults on import.
-XGRAMMAR_VERSION="0.2.2"
+# See install_common() — xgrammar 0.2.4 with tvm-ffi 0.1.13 segfaults on import.
+XGRAMMAR_VERSION="0.2.7"
 TVM_FFI_VERSION="0.1.11"
 
 print_usage() {
@@ -121,16 +121,18 @@ install_common() {
 
   # Pin xgrammar and its tvm-ffi runtime.
   #
-  # vLLM only asks for "xgrammar>=0.2.0,<1.0.0", so a fresh resolve picks up
-  # whatever is newest. xgrammar 0.2.4 (with apache-tvm-ffi 0.1.13) segfaults in
-  # its own static initialiser the moment `import vllm` loads it:
+  # vLLM pins xgrammar itself (==0.2.7 as of 0.31.0) but leaves apache-tvm-ffi
+  # floating, and the pair has crashed before: xgrammar 0.2.4 (with
+  # apache-tvm-ffi 0.1.13) segfaults in its own static initialiser the moment
+  # `import vllm` loads it:
   #   !!!!!!! Segfault encountered !!!!!!!
   #     TVMFFIEnvRegisterCAPI / xgrammar::__TVMFFIStaticInitFunc0()
   # taking the whole process down (exit 139) before any vLLM code runs. It is
   # not JVM-specific — a plain `python -c "from vllm import LLM"` crashes too.
   #
-  # 0.2.2/0.1.11 is the last combination verified to import cleanly. Revisit
-  # when bumping VLLM_VERSION; xgrammar backs GuidedDecodingParams, so
+  # 0.2.7/0.1.11 is verified to import and run structured output. Keep
+  # XGRAMMAR_VERSION equal to vLLM's own pin when bumping VLLM_VERSION, or
+  # `uv pip check` flags the venv; xgrammar backs GuidedDecodingParams, so
   # GuidedDecodingTest must pass on the new pair.
   "$UV_BIN" pip install --python "$VENV_PYTHON" \
     "xgrammar==${XGRAMMAR_VERSION}" "apache-tvm-ffi==${TVM_FFI_VERSION}"
@@ -338,7 +340,8 @@ case "$BACKEND" in
 
     # Probe the compiled extension — `import vllm` sails past a broken one.
     # The 0.26 CUDA wheels ship it as _C_stable_libtorch; vllm._C is CPU-only now.
-    if "$VENV_PYTHON" -c "import vllm._C_stable_libtorch" &>/dev/null &&
+    # torchcodec links its own CUDA runtime, so it gets the same check.
+    if "$VENV_PYTHON" -c "import vllm._C_stable_libtorch, torchcodec" &>/dev/null &&
        [[ "$CURRENT_CUDA_MAJOR" == "$WANT_CUDA_MAJOR" &&
           "$CURRENT_VLLM_VERSION" == "$VLLM_VERSION" ]]; then
       echo "vllm ${VLLM_VERSION} already installed and built for CUDA ${CURRENT_CUDA_MAJOR} — skipping."
@@ -346,12 +349,14 @@ case "$BACKEND" in
       if [[ -n "$CURRENT_VLLM_VERSION" ]]; then
         if [[ "$CURRENT_VLLM_VERSION" != "$VLLM_VERSION" ]]; then
           echo "Upgrading venv: vllm ${CURRENT_VLLM_VERSION} installed, ${VLLM_VERSION} wanted."
-        elif "$VENV_PYTHON" -c "import vllm._C_stable_libtorch" &>/dev/null; then
+        elif ! "$VENV_PYTHON" -c "import vllm._C_stable_libtorch" &>/dev/null; then
+          echo "Repairing venv: vllm's compiled extension does not load — its CUDA runtime" \
+               "does not match torch (CUDA ${CURRENT_CUDA_MAJOR:-unknown})."
+        elif [[ "$CURRENT_CUDA_MAJOR" != "$WANT_CUDA_MAJOR" ]]; then
           echo "Repairing venv: torch targets CUDA ${CURRENT_CUDA_MAJOR:-unknown}," \
                "this driver needs CUDA ${WANT_CUDA_MAJOR}."
         else
-          echo "Repairing venv: vllm's compiled extension does not load — its CUDA runtime" \
-               "does not match torch (CUDA ${CURRENT_CUDA_MAJOR:-unknown})."
+          echo "Repairing venv: torchcodec does not load — it targets another CUDA than torch."
         fi
       fi
 
@@ -362,6 +367,12 @@ case "$BACKEND" in
       "$UV_BIN" pip install --python "$VENV_PYTHON" \
         --reinstall-package vllm --reinstall-package torch \
         "$VLLM_PACKAGE" --torch-backend="$TORCH_BACKEND"
+
+      # --torch-backend leaves torchcodec on PyPI, whose wheels are CUDA 13 builds.
+      if [[ "$TORCH_BACKEND" == "cu129" ]]; then
+        "$UV_BIN" pip install --python "$VENV_PYTHON" --reinstall-package torchcodec \
+          torchcodec --index-url https://download.pytorch.org/whl/cu129
+      fi
     fi
 
     install_common
