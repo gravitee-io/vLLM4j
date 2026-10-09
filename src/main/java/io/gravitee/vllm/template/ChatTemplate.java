@@ -18,12 +18,12 @@ package io.gravitee.vllm.template;
 import io.gravitee.vllm.binding.CPythonBinding;
 import io.gravitee.vllm.binding.PythonCall;
 import io.gravitee.vllm.binding.PythonErrors;
+import io.gravitee.vllm.binding.PythonObjects;
 import io.gravitee.vllm.binding.PythonTypes;
 import io.gravitee.vllm.engine.VllmEngine;
 import io.gravitee.vllm.runtime.GIL;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
@@ -447,79 +447,16 @@ public final class ChatTemplate {
     return pyList;
   }
 
-  // ── Recursive Java → Python conversion ──────────────────────────────────
+  // ── Java → Python conversion ────────────────────────────────────────────
 
   /**
-   * Recursively converts a Java {@code Map<String, Object>} to a Python dict.
-   *
-   * <p>Supported value types:
-   * <ul>
-   *   <li>{@code String} → Python str</li>
-   *   <li>{@code Integer}, {@code Long} → Python int</li>
-   *   <li>{@code Double}, {@code Float} → Python float</li>
-   *   <li>{@code Boolean} → Python bool</li>
-   *   <li>{@code Map<String, Object>} → Python dict (recursive)</li>
-   *   <li>{@code List<?>} / {@code Collection<?>} → Python list (recursive)</li>
-   *   <li>{@code null} → Python None</li>
-   * </ul>
+   * Converts a Java {@code Map<String, Object>} to a Python dict; see
+   * {@link PythonObjects#toPython} for the supported value types.
    *
    * @param map the Java map to convert
    * @return new Python dict reference
    */
-  @SuppressWarnings("unchecked")
   MemorySegment mapToPyDict(Map<String, Object> map) {
-    MemorySegment pyDict = CPythonBinding.PyDict_New();
-    for (var entry : map.entrySet()) {
-      MemorySegment pyValue = javaToPython(entry.getValue());
-      CPythonBinding.PyDict_SetItemString(
-        pyDict,
-        arena.allocateFrom(entry.getKey()),
-        pyValue
-      );
-      PythonTypes.decref(pyValue);
-    }
-    return pyDict;
-  }
-
-  /**
-   * Recursively converts a Java object to a Python object.
-   */
-  @SuppressWarnings("unchecked")
-  private MemorySegment javaToPython(Object value) {
-    if (value == null) {
-      return PythonTypes.pyNone();
-    }
-    if (value instanceof String s) {
-      return PythonTypes.pyStr(arena, s);
-    }
-    if (value instanceof Integer i) {
-      return CPythonBinding.PyLong_FromLong(i);
-    }
-    if (value instanceof Long l) {
-      return CPythonBinding.PyLong_FromLong(l);
-    }
-    if (value instanceof Double d) {
-      return CPythonBinding.PyFloat_FromDouble(d);
-    }
-    if (value instanceof Float f) {
-      return CPythonBinding.PyFloat_FromDouble(f.doubleValue());
-    }
-    if (value instanceof Boolean b) {
-      return b ? PythonTypes.pyTrue() : PythonTypes.pyFalse();
-    }
-    if (value instanceof Map<?, ?> m) {
-      return mapToPyDict((Map<String, Object>) m);
-    }
-    if (value instanceof Collection<?> c) {
-      MemorySegment pyList = CPythonBinding.PyList_New(0);
-      for (Object item : c) {
-        MemorySegment pyItem = javaToPython(item);
-        CPythonBinding.PyList_Append(pyList, pyItem);
-        PythonTypes.decref(pyItem);
-      }
-      return pyList;
-    }
-    // Fallback: convert to string
-    return PythonTypes.pyStr(arena, value.toString());
+    return PythonObjects.toPyDict(arena, map);
   }
 }

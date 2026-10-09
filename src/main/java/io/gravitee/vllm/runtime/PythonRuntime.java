@@ -26,6 +26,7 @@ import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -133,6 +134,39 @@ public final class PythonRuntime implements AutoCloseable {
   }
 
   private volatile boolean closed = false;
+
+  // ── Venv auto-detection ────────────────────────────────────────────────
+
+  /**
+   * Locates the venv: the {@code vllm4j.venv} system property, then
+   * {@code $CWD/.venv}, then {@code $HOME/.venv}.
+   *
+   * @throws VllmException if none exists
+   */
+  public static Path resolveVenv() {
+    // 1. System property
+    String prop = System.getProperty("vllm4j.venv");
+    if (prop != null) {
+      Path p = Path.of(prop);
+      if (Files.isDirectory(p)) return p;
+    }
+
+    // 2. CWD/.venv
+    Path cwd = Path.of(System.getProperty("user.dir"), ".venv");
+    if (Files.isDirectory(cwd)) return cwd;
+
+    // 3. HOME/.venv
+    String home = System.getProperty("user.home");
+    if (home != null) {
+      Path homeDotVenv = Path.of(home, ".venv");
+      if (Files.isDirectory(homeDotVenv)) return homeDotVenv;
+    }
+
+    throw new VllmException(
+      "Cannot locate a .venv directory. " +
+        "Set the system property 'vllm4j.venv' or pass venvPath(...) to the builder."
+    );
+  }
 
   /**
    * Saved thread state from {@code PyEval_SaveThread()}.

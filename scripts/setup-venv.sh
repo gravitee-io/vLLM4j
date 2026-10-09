@@ -21,11 +21,13 @@
 # profile during the 'initialize' phase.
 #
 # Usage:
-#   ./setup-venv.sh -d <project_dir> -v <python_version> -b <backend>
+#   ./setup-venv.sh -d <project_dir> -v <python_version> -b <backend> [-r]
 #
 #   -d  project root directory (where .venv will be created)
 #   -v  Python version (e.g. 3.12)
 #   -b  backend: metal | cuda | cpu
+#   -r  also install vllm-srun, the vLLM Semantic Router model runtime that
+#       VllmDecider drives (same as VLLM4J_DECISION=1)
 #
 
 set -euo pipefail
@@ -37,17 +39,23 @@ VLLM_VERSION="0.31.0"  # minimum version floor; CUDA/CPU pull latest nightly >= 
 # See install_common() — xgrammar 0.2.4 with tvm-ffi 0.1.13 segfaults on import.
 XGRAMMAR_VERSION="0.2.7"
 TVM_FFI_VERSION="0.1.11"
+# vllm-srun is not on PyPI: installed from the semantic-router repository at
+# this commit. See install_decision_runtime().
+SR_RUNTIME_REF="f4c54cffb5dcb0385ada52c7c03e99b5663ed402"
+WITH_DECISION="${VLLM4J_DECISION:-0}"
 
 print_usage() {
-  echo "Usage: $0 -d <project_dir> -v <python_version> -b <backend>"
+  echo "Usage: $0 -d <project_dir> -v <python_version> -b <backend> [-r]"
   echo "  backend: metal | cuda | cpu"
+  echo "  -r: also install vllm-srun (decision models)"
 }
 
-while getopts ":d:v:b:h" opt; do
+while getopts ":d:v:b:rh" opt; do
   case ${opt} in
     d) PROJECT_DIR=$OPTARG ;;
     v) PYTHON_VERSION=$OPTARG ;;
     b) BACKEND=$OPTARG ;;
+    r) WITH_DECISION=1 ;;
     h) print_usage; exit 0 ;;
     \?) echo "Invalid option: -$OPTARG" >&2; print_usage; exit 1 ;;
     :)  echo "Option -$OPTARG requires an argument." >&2; print_usage; exit 1 ;;
@@ -136,6 +144,25 @@ install_common() {
   # GuidedDecodingTest must pass on the new pair.
   "$UV_BIN" pip install --python "$VENV_PYTHON" \
     "xgrammar==${XGRAMMAR_VERSION}" "apache-tvm-ffi==${TVM_FFI_VERSION}"
+}
+
+# Installs vllm-srun, the model runtime of vLLM Semantic Router, which serves
+# its decision models (vllm-sr/Decision-1.0-*, Decision-2.0-*). vLLM's
+# LLMEngine cannot run them; VllmDecider drives this runtime in-process.
+#
+# torch is constrained to the version vLLM already installed, so the runtime
+# runs on the same torch as the engine instead of pulling its own. All its
+# other dependencies (safetensors, tokenizers, huggingface-hub, starlette…)
+# are already in a vLLM venv.
+install_decision_runtime() {
+  local torch_version constraints
+  torch_version="$("$VENV_PYTHON" -I -c 'import torch; print(torch.__version__)')"
+  constraints="$(mktemp)"
+  echo "torch==${torch_version}" > "$constraints"
+  echo "Installing vllm-srun @ ${SR_RUNTIME_REF} (torch==${torch_version}) ..."
+  "$UV_BIN" pip install --python "$VENV_PYTHON" --constraint "$constraints" \
+    "vllm-srun @ git+https://github.com/vllm-project/semantic-router@${SR_RUNTIME_REF}#subdirectory=src/model-runtime"
+  rm -f "$constraints"
 }
 
 # Aligns the CUDA build toolchain (nvcc, nvvm/cicc, crt, cccl) to the CUDA
@@ -390,5 +417,9 @@ case "$BACKEND" in
     exit 1
     ;;
 esac
+
+if [[ "$WITH_DECISION" == "1" ]]; then
+  install_decision_runtime
+fi
 
 echo "venv setup complete for backend '$BACKEND' at $VENV_DIR"

@@ -460,6 +460,17 @@ try (var sp = new SamplingParams()
 }
 ```
 
+To score a fixed set of tokens (classifier labels, `A`/`B`/`C` option codes), ask for exactly those
+with `logprobTokenIds(...)` instead of the top N; they are reported even when they are unlikely:
+
+```java
+List<Integer> labels = List.of(engine.encode("A", false).getFirst(), engine.encode("B", false).getFirst());
+try (var sp = new SamplingParams().temperature(0.0).maxTokens(1).logprobTokenIds(labels)) {
+    Map<Integer, LogprobEntry> next = engine.generate(new VllmRequest("score-1", prompt, sp))
+        .outputs().getFirst().logprobs().getFirst();   // one entry per label (plus the sampled token)
+}
+```
+
 When streaming via `VllmIterator`, `tokenIds` and `logprobs` are emitted only on the final output (`finished=true`) to avoid accumulating data in memory across every step:
 
 ```java
@@ -583,6 +594,41 @@ iterator.addRequest(normalRequest);
 iterator.addRequest(urgentRequest);  // scheduled first despite being added second
 ```
 
+### Decision models (vLLM Semantic Router)
+
+[Decision models](https://vllm-sr.ai/blog/decision-models/) answer typed questions about a state in one forward pass, without generating tokens: pick an option (`choice`), give the probability that a condition holds (`noul`), or place it on an ordered rubric (`score`). vLLM's `LLMEngine` does not run them; vLLM Semantic Router serves them with its own model runtime, `vllm_srun`. `VllmDecider` drives that runtime in the embedded CPython, the way `VllmEngine` drives `LLMEngine`: no HTTP server, no extra process.
+
+It needs `vllm-srun` in the venv, installed on the engine's torch:
+
+```bash
+VLLM4J_DECISION=1 mvn clean package -P macosx-aarch64,metal -DskipTests   # or: scripts/setup-venv.sh -b metal -r
+```
+
+```java
+try (var decider = VllmDecider.builder()
+        .model("vllm-sr/Decision-2.0-Kai-0.6B")   // any built-in Decision 1.0 / 2.0 model
+        .device("auto")                            // cpu, cuda, mps, rocm...
+        .build()) {                                // loads, verifies, checks golden answers
+
+    DecisionResponse response = decider.decide(
+        DecisionRequest.builder(Map.of("request", "I was charged twice this month."))
+            .choice("intent", "What does the user want?",
+                Map.of("billing", "Payment or invoice issue", "account", "Login or access issue"))
+            .noul("upset", "Is the user upset?")
+            .score("urgency", "How urgent is it?", List.of("Not urgent", "Somewhat urgent", "Urgent"))
+            .build());
+
+    var intent = (Answer.Choice) response.answer("intent");   // choice, probabilities, confidence
+    var upset = (Answer.Noul) response.answer("upset");       // probability
+    var urgency = (Answer.Score) response.answer("urgency");  // score, probabilities, legend
+}
+```
+
+- **Answers** are the runtime's `POST /v1/decisions` answers. A question that cannot be answered comes back as an `Answer.Failed` while its siblings are answered; a request refused as a whole throws `DecisionException` with the contract's status and code.
+- **Raw bodies**: `decide(Map<String, Object>)` takes and returns the `/v1/decisions` JSON as Java maps, for what the typed API leaves out (`states`, `set` and `span` questions).
+- **Concurrency**: `decide` is thread-safe and releases the GIL while it waits, so concurrent calls are batched by the runtime's scheduler.
+- **Next to an engine**: a decider and a `VllmEngine` share one interpreter. On a shared GPU, cap the decider with `memoryBudgetGib(...)` and the engine with `gpuMemoryUtilization(...)`.
+
 ---
 
 ## Project structure
@@ -603,10 +649,12 @@ vLLM4j/
     │   ├── runtime/                  # CPython lifecycle (PythonRuntime, PythonRef)
     │   ├── binding/                  # FFM helpers (PythonCall, PythonTypes, PythonErrors)
     │   ├── engine/                   # VllmEngine, SamplingParams, RequestOutput, ...
+    │   ├── decision/                 # VllmDecider (vLLM Semantic Router decision models)
     │   ├── iterator/                 # VllmIterator (continuous batching), VllmOutput
     │   ├── state/                    # ConversationState, StateEvaluation FSM, TokenTracking
     │   └── template/                 # ChatTemplate (Jinja2), ChatMessage, Tool
     └── test/java/io/gravitee/vllm/
+        ├── decision/                 # Decision request/response mapping; VllmDecider integration
         ├── engine/                   # Unit tests for records, FinishReason, RequestMetrics
         ├── iterator/                 # Integration tests (real engine, parallel capitals)
         ├── platform/                 # Unit tests for platform detection
@@ -631,6 +679,9 @@ mvn test -P integration,macosx-aarch64,metal
 # wired up automatically. On pre-Ampere GPUs (sm < 80) the profile sets
 # VLLM4J_ATTENTION_BACKEND=TRITON_ATTN; see Linux / CUDA notes.
 mvn test -P integration,linux-x86_64,cuda
+
+# Decision model tests (vllm-srun in the venv, Decision-2.0-Kai-0.6B on CPU)
+mvn test -P decision-integration,macosx-aarch64
 ```
 
 ## Linux / CUDA notes
@@ -754,6 +805,7 @@ Two orthogonal axes:
 
 **Test control:**
 - `integration` -- runs `@Tag("integration")` tests (excluded by default). Uses `reuseForks=false` so each test class gets its own JVM fork with a clean GPU.
+- `decision-integration` -- runs `@Tag("decision-integration")` tests (excluded by default): `VllmDecider` against a real decision model. Needs `vllm-srun` in the venv.
 
 Example: `mvn clean package -P macosx-aarch64,metal`
 
@@ -792,6 +844,7 @@ Token Classification:
 - **Lazy tokenIds/logprobs** -- `tokenIds` and `logprobs` are omitted from `VllmOutput` during streaming and emitted only on the final output (`finished=true`) to avoid O(n) per-step memory accumulation
 - **State classification is Java-side** -- a tag-based FSM classifies generated text (following llamaj.cpp's pattern)
 - **Tools are template-level** -- passed as a `tools` variable to the Jinja2 chat template
+- **Decision models run on `vllm_srun`, not `LLMEngine`** -- vLLM cannot load their heads; `VllmDecider` drives vLLM Semantic Router's runtime in the same interpreter instead. Its `exit_on_device_error` is forced off, as it would `os._exit` the JVM on a device failure; the model reports `degraded` instead
 - **`/dev/shm` fix on Linux** -- vLLM 0.16+ uses `multiprocessing.Lock()` which requires `/dev/shm` write access. The `linux-x86_64` Maven profile runs `sudo chmod 1777 /dev/shm` during `validate` to fix misconfigured permissions
 
 ## License

@@ -59,7 +59,7 @@
         <cpython.class>CPython</cpython.class>
 
         <!-- Exclude integration tests by default -->
-        <surefire.excludedGroups>integration | vlm-integration</surefire.excludedGroups>
+        <surefire.excludedGroups>integration | vlm-integration | decision-integration</surefire.excludedGroups>
     </properties>
 
     <!--
@@ -469,6 +469,31 @@
             </build>
         </profile>
 
+
+        <!-- Decision integration test profile — runs @Tag("decision-integration")
+             tests only: vLLM Semantic Router decision models through vllm_srun.
+             Needs vllm-srun in the venv (scripts/setup-venv.sh -r).
+             Usage: mvn test -P decision-integration,macosx-aarch64 -->
+        <profile>
+            <id>decision-integration</id>
+            <properties>
+                <surefire.excludedGroups/>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.5.5</version>
+                        <configuration>
+                            <groups>decision-integration</groups>
+                            <forkCount>1</forkCount>
+                            <reuseForks>false</reuseForks>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
 
     </profiles>
 
