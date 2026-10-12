@@ -97,6 +97,36 @@ class DecisionRequestTest {
   }
 
   @Test
+  void images_and_videos_are_sent_only_when_present() {
+    var body = DecisionRequest.builder("text")
+      .noul("q", "Is it?")
+      .image("data:image/png;base64,AAAA")
+      .video("data:video/mp4;base64,BBBB")
+      .build()
+      .toMap();
+    assertThat(body.get("images")).isEqualTo(
+      List.of("data:image/png;base64,AAAA")
+    );
+    assertThat(body.get("videos")).isEqualTo(
+      List.of("data:video/mp4;base64,BBBB")
+    );
+
+    var textOnly = DecisionRequest.builder("text").noul("q", "Is it?").build();
+    assertThat(textOnly.toMap()).doesNotContainKeys("images", "videos");
+  }
+
+  @Test
+  void media_must_be_data_urls() {
+    var builder = DecisionRequest.builder("text");
+    assertThatThrownBy(() -> builder.image("image/png;base64,AAAA"))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("data:image/");
+    assertThatThrownBy(() -> builder.video("data:image/png;base64,AAAA"))
+      .isInstanceOf(IllegalArgumentException.class)
+      .hasMessageContaining("data:video/");
+  }
+
+  @Test
   void choice_option_descriptions_may_be_null() {
     var question = new Question.Choice("Pick", criteria("a", null, "b", null));
     assertThat(question.criteria()).containsEntry("a", null);

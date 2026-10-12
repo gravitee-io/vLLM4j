@@ -606,7 +606,7 @@ VLLM4J_DECISION=1 mvn clean package -P macosx-aarch64,metal -DskipTests   # or: 
 
 ```java
 try (var decider = VllmDecider.builder()
-        .model("vllm-sr/Decision-2.0-Kai-0.6B")   // any built-in Decision 1.0 / 2.0 model
+        .model("vllm-sr/Decision-2.0-Kai-0.6B")   // any built-in Decision 1.0, 2.0 or 3.0 model
         .device("auto")                            // cpu, cuda, mps, rocm...
         .build()) {                                // loads, verifies, checks golden answers
 
@@ -625,6 +625,7 @@ try (var decider = VllmDecider.builder()
 ```
 
 - **Answers** are the runtime's `POST /v1/decisions` answers. A question that cannot be answered comes back as an `Answer.Failed` while its siblings are answered; a request refused as a whole throws `DecisionException` with the contract's status and code.
+- **Decision 3.0** (`vllm-sr/d3`, `d3-flash`, `d3-mini`, `d3-nano`, `d3-lite`, `d3-edge`) also reads images and videos: add them with `.image("data:image/png;base64,...")` and `.video("data:video/mp4;base64,...")`. On Apple Silicon run it with `device("mps")`: the runtime's CPU golden answers were recorded on x86, and the BF16 CPU path here rounds outside their tolerance, so the model refuses to load on `cpu`.
 - **Raw bodies**: `decide(Map<String, Object>)` takes and returns the `/v1/decisions` JSON as Java maps, for what the typed API leaves out (`states`, `set` and `span` questions).
 - **Concurrency**: `decide` is thread-safe and releases the GIL while it waits, so concurrent calls are batched by the runtime's scheduler.
 - **Next to an engine**: a decider and a `VllmEngine` share one interpreter. On a shared GPU, cap the decider with `memoryBudgetGib(...)` and the engine with `gpuMemoryUtilization(...)`.

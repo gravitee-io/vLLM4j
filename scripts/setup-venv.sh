@@ -41,7 +41,7 @@ XGRAMMAR_VERSION="0.2.7"
 TVM_FFI_VERSION="0.1.11"
 # vllm-srun is not on PyPI: installed from the semantic-router repository at
 # this commit. See install_decision_runtime().
-SR_RUNTIME_REF="f4c54cffb5dcb0385ada52c7c03e99b5663ed402"
+SR_RUNTIME_REF="5a77c1101d93a8382d385e2c384d4c5cd986c038"
 WITH_DECISION="${VLLM4J_DECISION:-0}"
 
 print_usage() {
@@ -161,7 +161,7 @@ install_decision_runtime() {
   echo "torch==${torch_version}" > "$constraints"
   echo "Installing vllm-srun @ ${SR_RUNTIME_REF} (torch==${torch_version}) ..."
   "$UV_BIN" pip install --python "$VENV_PYTHON" --constraint "$constraints" \
-    "vllm-srun @ git+https://github.com/vllm-project/semantic-router@${SR_RUNTIME_REF}#subdirectory=src/model-runtime"
+    "vllm-srun[multimodal] @ git+https://github.com/vllm-project/semantic-router@${SR_RUNTIME_REF}#subdirectory=src/model-runtime"
   rm -f "$constraints"
 }
 

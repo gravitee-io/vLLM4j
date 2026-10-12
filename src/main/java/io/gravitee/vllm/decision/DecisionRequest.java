@@ -15,6 +15,7 @@
  */
 package io.gravitee.vllm.decision;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,17 +31,24 @@ import java.util.Map;
  *         Map.of("billing", "Payment or invoice issue", "account", "Login or access issue"))
  *     .noul("upset", "Is the user upset?")
  *     .score("urgency", "How urgent is it?", List.of("Not urgent", "Somewhat urgent", "Urgent"))
+ *     .image("data:image/png;base64,...") // Decision 3.0 only
  *     .build();
  * }</pre>
  *
  * @param state     text, or a JSON-like {@code Map}/{@code List} (typed-part models read
  *                  {@code request}/{@code user}/{@code prompt} and {@code answer}/{@code response})
  * @param questions question name → question, in answer order
+ * @param images    base64 PNG, JPEG or WebP data URLs, for models that read
+ *                  images (Decision 3.0); may be empty
+ * @param videos    base64 MP4, WebM, QuickTime or Matroska data URLs, for models
+ *                  that read videos (Decision 3.0); may be empty
  * @param options   request options, or {@code null} for the defaults
  */
 public record DecisionRequest(
   Object state,
   Map<String, Question> questions,
+  List<String> images,
+  List<String> videos,
   DecisionOptions options
 ) {
   public DecisionRequest {
@@ -51,6 +59,17 @@ public record DecisionRequest(
       throw new IllegalArgumentException("at least one question is required");
     }
     questions = Collections.unmodifiableMap(new LinkedHashMap<>(questions));
+    images = images == null ? List.of() : List.copyOf(images);
+    videos = videos == null ? List.of() : List.copyOf(videos);
+  }
+
+  /** A text-only request. */
+  public DecisionRequest(
+    Object state,
+    Map<String, Question> questions,
+    DecisionOptions options
+  ) {
+    this(state, questions, List.of(), List.of(), options);
   }
 
   /** Starts a request about {@code state}. */
@@ -65,6 +84,12 @@ public record DecisionRequest(
     Map<String, Object> qs = new LinkedHashMap<>();
     questions.forEach((name, question) -> qs.put(name, question.toMap()));
     body.put("questions", qs);
+    if (!images.isEmpty()) {
+      body.put("images", images);
+    }
+    if (!videos.isEmpty()) {
+      body.put("videos", videos);
+    }
     if (options != null) {
       Map<String, Object> opts = options.toMap();
       if (!opts.isEmpty()) {
@@ -79,6 +104,8 @@ public record DecisionRequest(
 
     private final Object state;
     private final Map<String, Question> questions = new LinkedHashMap<>();
+    private final List<String> images = new ArrayList<>();
+    private final List<String> videos = new ArrayList<>();
     private DecisionOptions options;
 
     private Builder(Object state) {
@@ -112,13 +139,34 @@ public record DecisionRequest(
       return question(name, new Question.Score(instructions, levels));
     }
 
+    /** Adds an image, as a base64 {@code data:image/...} URL. */
+    public Builder image(String dataUrl) {
+      images.add(requireDataUrl(dataUrl, "image"));
+      return this;
+    }
+
+    /** Adds a video, as a base64 {@code data:video/...} URL. */
+    public Builder video(String dataUrl) {
+      videos.add(requireDataUrl(dataUrl, "video"));
+      return this;
+    }
+
+    private static String requireDataUrl(String dataUrl, String kind) {
+      if (dataUrl == null || !dataUrl.startsWith("data:" + kind + "/")) {
+        throw new IllegalArgumentException(
+          kind + " must be a data:" + kind + "/... URL"
+        );
+      }
+      return dataUrl;
+    }
+
     public Builder options(DecisionOptions options) {
       this.options = options;
       return this;
     }
 
     public DecisionRequest build() {
-      return new DecisionRequest(state, questions, options);
+      return new DecisionRequest(state, questions, images, videos, options);
     }
   }
 }

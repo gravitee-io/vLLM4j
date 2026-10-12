@@ -40,11 +40,11 @@ class VllmDeciderWithEngineTest {
         .enforceEager(true)
         .maxModelLen(1024)
         .maxNumSeqs(2)
-        .gpuMemoryUtilization(0.5)
+        .gpuMemoryUtilization(0.3)
         .build();
       var decider = VllmDecider.builder()
         .model("vllm-sr/Decision-2.0-Kai-0.6B")
-        .device("cpu")
+        .device(System.getProperty("vllm4j.decision.device", "cpu"))
         .build()
     ) {
       Map<String, String> routes = new LinkedHashMap<>();

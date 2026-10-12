@@ -44,7 +44,7 @@ class VllmDeciderTest {
   static void setUp() {
     decider = VllmDecider.builder()
       .model("vllm-sr/Decision-2.0-Kai-0.6B")
-      .device("cpu")
+      .device(System.getProperty("vllm4j.decision.device", "cpu"))
       .build();
   }
 
