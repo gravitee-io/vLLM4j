@@ -430,7 +430,9 @@ public final class VllmEngineBuilder {
    */
   public VllmEngineBuilder initRuntime() {
     if (runtime == null) {
-      Path resolvedVenv = (venvPath != null) ? venvPath : resolveVenv();
+      Path resolvedVenv = (venvPath != null)
+        ? venvPath
+        : PythonRuntime.resolveVenv();
       VllmBackend resolvedBackend = (backend != null)
         ? backend
         : PlatformResolver.backend();
@@ -458,33 +460,6 @@ public final class VllmEngineBuilder {
     initRuntime();
     Arena resolvedArena = (arena != null) ? arena : Arena.ofAuto();
     return new VllmEngine(resolvedArena, this);
-  }
-
-  // ── Venv auto-detection ────────────────────────────────────────────────
-
-  private static Path resolveVenv() {
-    // 1. System property
-    String prop = System.getProperty("vllm4j.venv");
-    if (prop != null) {
-      Path p = Path.of(prop);
-      if (Files.isDirectory(p)) return p;
-    }
-
-    // 2. CWD/.venv
-    Path cwd = Path.of(System.getProperty("user.dir"), ".venv");
-    if (Files.isDirectory(cwd)) return cwd;
-
-    // 3. HOME/.venv
-    String home = System.getProperty("user.home");
-    if (home != null) {
-      Path homeDotVenv = Path.of(home, ".venv");
-      if (Files.isDirectory(homeDotVenv)) return homeDotVenv;
-    }
-
-    throw new VllmException(
-      "Cannot locate a .venv directory. " +
-        "Set the system property 'vllm4j.venv' or use VllmEngine.builder().venvPath(...)."
-    );
   }
 
   // ── Package-private accessors for VllmEngine ────────────────────────────
