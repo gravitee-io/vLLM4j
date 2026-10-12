@@ -151,6 +151,9 @@ commands:
         type: string
       backend:
         type: string
+      decision:
+        type: boolean
+        default: false
     steps:
       # The cpu and metal backends compile the vLLM core from source, which
       # takes 30+ minutes on a 4-vCPU executor. setup-venv.sh is idempotent —
@@ -181,7 +184,8 @@ commands:
             elif [[ << parameters.os >> == "linux" ]]; then
               source $BASH_ENV
             fi
-            bash scripts/setup-venv.sh -d . -v 3.12 -b << parameters.backend >>
+            # -r adds vllm-srun, the runtime the decision tests drive.
+            bash scripts/setup-venv.sh -d . -v 3.12 -b << parameters.backend >> <<# parameters.decision >>-r<</ parameters.decision >>
       - when:
           condition:
             equal: ["linux", << parameters.os >>]
@@ -250,12 +254,16 @@ commands:
       run_vlm_integration:
         type: boolean
         default: false
+      run_decision_integration:
+        type: boolean
+        default: false
     steps:
       - attach_workspace:
           at: /tmp/
       - setup_venv:
           os: << parameters.os >>
           backend: << parameters.backend >>
+          decision: << parameters.run_decision_integration >>
       - run:
           name: Run Unit Tests
           environment:
@@ -308,6 +316,24 @@ commands:
                   fi
 
                   mvn -s .gravitee.azure.settings.xml test -Pvlm-integration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
+      - when:
+          condition: << parameters.run_decision_integration >>
+          steps:
+            - run:
+                name: Run Decision Integration Tests
+                environment:
+                  MAVEN_OPTS: "-Xmx8g -Xms2g"
+                no_output_timeout: 30m
+                command: |
+                  cd $HOME_DIR/vLLM4j
+
+                  if [[ << parameters.os >> == "macosx" ]]; then
+                    source ~/.zprofile
+                  elif [[ << parameters.os >> == "linux" ]]; then
+                    source $BASH_ENV
+                  fi
+
+                  mvn -s .gravitee.azure.settings.xml test -Pdecision-integration,<< parameters.os >>-<< parameters.platform >>,<< parameters.backend >>
 
   release_tag:
     steps:
@@ -432,6 +458,7 @@ jobs:
           backend: "metal"
           run_integration: true
           run_vlm_integration: false
+          run_decision_integration: true
 
   build_and_test_linux_x86_64:
     executor: ubuntu_linux_x86_64
