@@ -475,8 +475,27 @@ public final class VllmEngine implements AutoCloseable {
    * @param requestId    the request this belongs to
    * @param delta        the new text fragment
    * @param promptTokens prompt length, for usage accounting
+   * @param tokenIds     the token ids this step generated; empty unless the
+   *                     request asked for logprobs
+   * @param logprobs     one map per generated token, {@code null} unless the
+   *                     request asked for logprobs
    */
-  public record FastOutput(String requestId, String delta, int promptTokens) {}
+  public record FastOutput(
+    String requestId,
+    String delta,
+    int promptTokens,
+    List<Integer> tokenIds,
+    List<Map<Integer, LogprobEntry>> logprobs
+  ) {
+    public FastOutput {
+      tokenIds = tokenIds == null ? List.of() : tokenIds;
+    }
+
+    /** A step without logprobs. */
+    public FastOutput(String requestId, String delta, int promptTokens) {
+      this(requestId, delta, promptTokens, List.of(), null);
+    }
+  }
 
   /**
    * Result of a packed step: still-generating sequences in compact form, plus
@@ -511,10 +530,15 @@ public final class VllmEngine implements AutoCloseable {
                 final.append(o)
             else:
                 c = o.outputs[0] if o.outputs else None
+                # Token ids and logprobs only for a request that asked for
+                # logprobs: everyone else keeps the three-field row.
+                lp = c.logprobs if c is not None else None
                 fast.append((
                     o.request_id,
                     c.text if c is not None else '',
                     len(o.prompt_token_ids) if o.prompt_token_ids else 0,
+                    list(c.token_ids) if lp is not None else None,
+                    list(lp) if lp is not None else None,
                 ))
         return (fast, final)
     """;
@@ -554,6 +578,11 @@ public final class VllmEngine implements AutoCloseable {
       List<FastOutput> streaming = new ArrayList<>((int) Math.max(fastSize, 0));
       for (long i = 0; i < fastSize; i++) {
         MemorySegment row = CPythonBinding.PyList_GetItem(fastList, i); // borrowed
+        // The mappers take ownership of their argument; tuple items are borrowed.
+        MemorySegment pyTokenIds = CPythonBinding.PyTuple_GetItem(row, 3);
+        MemorySegment pyLogprobs = CPythonBinding.PyTuple_GetItem(row, 4);
+        PythonTypes.incref(pyTokenIds);
+        PythonTypes.incref(pyLogprobs);
         streaming.add(
           new FastOutput(
             PythonTypes.pyUnicodeToString(
@@ -564,7 +593,9 @@ public final class VllmEngine implements AutoCloseable {
             ),
             (int) CPythonBinding.PyLong_AsLong(
               CPythonBinding.PyTuple_GetItem(row, 2)
-            )
+            ),
+            mapIntList(pyTokenIds),
+            mapLogprobsList(pyLogprobs)
           )
         );
       }

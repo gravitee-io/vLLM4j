@@ -36,9 +36,11 @@ import java.util.Map;
  * @param state        the semantic category of this delta ({@code ANSWER},
  *                     {@code REASONING}, or {@code TOOLS}), or {@code null}
  *                     if classification is not configured
- * @param tokenIds     all generated token IDs so far (cumulative), may be empty
- * @param logprobs     per-token logprob data (one map per generated token position),
- *                     or {@code null} if logprobs were not requested
+ * @param tokenIds     the token IDs generated in this step; while streaming,
+ *                     only when the request asked for logprobs. May be empty
+ * @param logprobs     per-token logprob data, one map per entry of
+ *                     {@code tokenIds}, or {@code null} if logprobs were not
+ *                     requested
  */
 public record VllmOutput(
   String requestId,

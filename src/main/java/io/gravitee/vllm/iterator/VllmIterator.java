@@ -244,8 +244,8 @@ public final class VllmIterator
             false,
             null,
             state,
-            List.of(),
-            null
+            fast.tokenIds(),
+            fast.logprobs()
           )
         );
       }
