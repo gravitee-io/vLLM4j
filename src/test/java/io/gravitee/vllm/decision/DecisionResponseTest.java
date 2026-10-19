@@ -111,6 +111,18 @@ class DecisionResponseTest {
   }
 
   @Test
+  void a_failure_without_a_message_maps() {
+    // Decision 1.0 reports an unreadable model output with no message.
+    var body = body();
+    @SuppressWarnings("unchecked")
+    var answers = (Map<String, Object>) body.get("answers");
+    answers.put("broken", Map.of("error", "invalid_model_output"));
+    assertThat(DecisionResponse.fromMap(body).answer("broken")).isEqualTo(
+      new Answer.Failed("invalid_model_output", null)
+    );
+  }
+
+  @Test
   void meta_is_empty_when_not_requested() {
     var body = body();
     body.remove("meta");

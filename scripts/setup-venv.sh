@@ -147,7 +147,7 @@ install_common() {
 }
 
 # Installs vllm-srun, the model runtime of vLLM Semantic Router, which serves
-# its decision models (vllm-sr/Decision-1.0-*, Decision-2.0-*). vLLM's
+# its decision models (vllm-sr/Decision-1.0-*, Decision-2.0-*, d3*). vLLM's
 # LLMEngine cannot run them; VllmDecider drives this runtime in-process.
 #
 # torch is constrained to the version vLLM already installed, so the runtime

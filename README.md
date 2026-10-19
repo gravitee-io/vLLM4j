@@ -471,7 +471,7 @@ try (var sp = new SamplingParams().temperature(0.0).maxTokens(1).logprobTokenIds
 }
 ```
 
-When streaming via `VllmIterator`, `tokenIds` and `logprobs` are emitted only on the final output (`finished=true`) to avoid accumulating data in memory across every step:
+When streaming via `VllmIterator` with logprobs requested, each output carries the token ids generated in that step and their logprobs, one map per token id; join the steps for the whole sequence. Without logprobs, steps carry no token ids:
 
 ```java
 try (var sp = new SamplingParams().temperature(0.0).maxTokens(64).logprobs(5)) {
@@ -479,12 +479,9 @@ try (var sp = new SamplingParams().temperature(0.0).maxTokens(64).logprobs(5)) {
     iterator.addRequest(new VllmRequest("lp-stream", prompt, sp));
 
     iterator.stream().forEach(output -> {
-        System.out.print(output.delta());           // available every step
-        if (output.finished()) {
-            // tokenIds and logprobs only available here
-            List<Integer> tokenIds = output.tokenIds();
-            List<Map<Integer, LogprobEntry>> logprobs = output.logprobs(); // null if not requested
-        }
+        System.out.print(output.delta());
+        List<Integer> tokenIds = output.tokenIds();                    // this step's tokens
+        List<Map<Integer, LogprobEntry>> logprobs = output.logprobs(); // one map per token id
     });
 }
 ```
@@ -610,10 +607,13 @@ try (var decider = VllmDecider.builder()
         .device("auto")                            // cpu, cuda, mps, rocm...
         .build()) {                                // loads, verifies, checks golden answers
 
+    Map<String, String> intents = new LinkedHashMap<>();   // options keep their order
+    intents.put("billing", "Payment or invoice issue");
+    intents.put("account", "Login or access issue");
+
     DecisionResponse response = decider.decide(
         DecisionRequest.builder(Map.of("request", "I was charged twice this month."))
-            .choice("intent", "What does the user want?",
-                Map.of("billing", "Payment or invoice issue", "account", "Login or access issue"))
+            .choice("intent", "What does the user want?", intents)
             .noul("upset", "Is the user upset?")
             .score("urgency", "How urgent is it?", List.of("Not urgent", "Somewhat urgent", "Urgent"))
             .build());
@@ -628,7 +628,11 @@ try (var decider = VllmDecider.builder()
 - **Decision 3.0** (`vllm-sr/d3`, `d3-flash`, `d3-mini`, `d3-nano`, `d3-lite`, `d3-edge`) also reads images and videos: add them with `.image("data:image/png;base64,...")` and `.video("data:video/mp4;base64,...")`. On Apple Silicon run it with `device("mps")`: the runtime's CPU golden answers were recorded on x86, and the BF16 CPU path here rounds outside their tolerance, so the model refuses to load on `cpu`.
 - **Raw bodies**: `decide(Map<String, Object>)` takes and returns the `/v1/decisions` JSON as Java maps, for what the typed API leaves out (`states`, `set` and `span` questions).
 - **Concurrency**: `decide` is thread-safe and releases the GIL while it waits, so concurrent calls are batched by the runtime's scheduler.
-- **Next to an engine**: a decider and a `VllmEngine` share one interpreter. On a shared GPU, cap the decider with `memoryBudgetGib(...)` and the engine with `gpuMemoryUtilization(...)`.
+- **Closing**: `close()` refuses new calls with `IllegalStateException`. A call already waiting gets its answer if the runtime gives it while stopping, or a `DecisionException` (503 `not_ready`); `close()` returns once every such call has returned.
+- **Next to an engine**: a decider and a `VllmEngine` share one interpreter, so two runtime settings reach the engine too:
+  - Loading a model freezes the Python heap (`gc.freeze()`): reference cycles among objects that existed then, the engine's included, are not collected until the decider is closed, which unfreezes it.
+  - In a container whose CPU quota is below PyTorch's thread count, the runtime lowers `torch.set_num_threads` for the whole process. Set `threads(...)` on the builder, or `OMP_NUM_THREADS`, to keep your own.
+  - On a shared GPU, cap the decider with `memoryBudgetGib(...)` and the engine with `gpuMemoryUtilization(...)`.
 
 ---
 
@@ -842,7 +846,7 @@ Token Classification:
 - **GIL acquired per call** -- each FFI crossing takes and releases the GIL (`GIL.acquire()` in a try-with-resources), so the JVM side never holds it between calls
 - **`VLLM_ENABLE_V1_MULTIPROCESSING=0`** -- in-process mode required for embedded CPython
 - **Delta streaming** -- the iterator flips the request's `SamplingParams` to `RequestOutputKind.DELTA`, so vLLM hands back only the new fragment each step; the cumulative text is accumulated Java-side and materialised on the final output only
-- **Lazy tokenIds/logprobs** -- `tokenIds` and `logprobs` are omitted from `VllmOutput` during streaming and emitted only on the final output (`finished=true`) to avoid O(n) per-step memory accumulation
+- **Per-step tokenIds/logprobs** -- a streamed `VllmOutput` carries only the token ids and logprobs of its own step, and only when the request asked for logprobs, so nothing accumulates across steps
 - **State classification is Java-side** -- a tag-based FSM classifies generated text (following llamaj.cpp's pattern)
 - **Tools are template-level** -- passed as a `tools` variable to the Jinja2 chat template
 - **Decision models run on `vllm_srun`, not `LLMEngine`** -- vLLM cannot load their heads; `VllmDecider` drives vLLM Semantic Router's runtime in the same interpreter instead. Its `exit_on_device_error` is forced off, as it would `os._exit` the JVM on a device failure; the model reports `degraded` instead

@@ -31,8 +31,8 @@ import java.util.Map;
  * Runs a vLLM Semantic Router decision model in-process and answers typed
  * questions about a state in one forward pass, without generating tokens.
  *
- * <p>Decision models (the {@code vllm-sr/Decision-1.0-*} and
- * {@code vllm-sr/Decision-2.0-*} families) are not served by vLLM's
+ * <p>Decision models (Decision 1.0 and 2.0, {@code vllm-sr/Decision-1.0-*} and
+ * {@code vllm-sr/Decision-2.0-*}, and Decision 3.0, {@code vllm-sr/d3*}) are not served by vLLM's
  * {@code LLMEngine}: vLLM Semantic Router runs them on its own model runtime,
  * {@code vllm_srun}. This class drives that runtime in the embedded CPython,
  * the same way {@link io.gravitee.vllm.engine.VllmEngine} drives
@@ -45,10 +45,12 @@ import java.util.Map;
  * try (var decider = VllmDecider.builder()
  *         .model("vllm-sr/Decision-2.0-Kai-0.6B")
  *         .build()) {
+ *     Map<String, String> intents = new LinkedHashMap<>();   // options keep their order
+ *     intents.put("billing", "Payment or invoice issue");
+ *     intents.put("account", "Login or access issue");
  *     DecisionResponse response = decider.decide(
  *         DecisionRequest.builder(Map.of("request", "I was charged twice this month."))
- *             .choice("intent", "What does the user want?",
- *                 Map.of("billing", "Payment or invoice issue", "account", "Login or access issue"))
+ *             .choice("intent", "What does the user want?", intents)
  *             .build());
  *     var intent = (Answer.Choice) response.answer("intent");
  * }
@@ -74,13 +76,24 @@ public final class VllmDecider implements AutoCloseable {
    * coroutines. {@code exit_on_device_error} is forced off — it would
    * {@code os._exit} the JVM on a device failure; the model reports
    * {@code degraded} instead.
+   *
+   * <p>{@code close()} refuses new calls, stops the runtime with the loop still
+   * running so the calls it answers can complete, then cancels whatever is
+   * left before stopping the loop: a caller is never left waiting on a loop
+   * that no longer runs. A refused or cancelled call is answered as the
+   * runtime answers a model that is not ready (503 {@code not_ready}).
    */
   private static final String SHIM_SOURCE = """
     import asyncio
+    import concurrent.futures
+    import gc
     import threading
 
     from vllm_srun.config import ModelConfig, ServeConfig
     from vllm_srun.runtime import Runtime
+
+    CLOSED = (503, {"error": {"code": "not_ready", "message": "the decider is closed"}})
+    DRAIN_SECONDS = 5
 
 
     class Vllm4jDecider:
@@ -89,6 +102,9 @@ public final class VllmDecider implements AutoCloseable {
             serve["exit_on_device_error"] = False
             self.runtime = Runtime(ServeConfig(models=(ModelConfig(**model),), **serve))
             self.runtime.start(background=False)
+            self.lock = threading.Lock()
+            self.pending = set()
+            self.closing = False
             self.loop = asyncio.new_event_loop()
             self.thread = threading.Thread(
                 target=self.loop.run_forever, name="vllm4j-decider", daemon=True
@@ -96,19 +112,44 @@ public final class VllmDecider implements AutoCloseable {
             self.thread.start()
 
         def decide(self, body):
-            # result() waits on a lock, which releases the GIL.
-            future = asyncio.run_coroutine_threadsafe(
-                self.runtime.call("decisions", body), self.loop
-            )
-            return future.result()
+            with self.lock:
+                if self.closing:
+                    return CLOSED
+                future = asyncio.run_coroutine_threadsafe(
+                    self.runtime.call("decisions", body), self.loop
+                )
+                self.pending.add(future)
+            try:
+                # result() waits on a lock, which releases the GIL.
+                return future.result()
+            except concurrent.futures.CancelledError:
+                return CLOSED
+            finally:
+                with self.lock:
+                    self.pending.discard(future)
 
         def health(self):
             return (self.runtime.health.state, self.runtime.health.reason)
 
         def close(self):
-            self.runtime.stop()
-            self.loop.call_soon_threadsafe(self.loop.stop)
-            self.thread.join(5)
+            with self.lock:
+                self.closing = True
+            try:
+                self.runtime.stop()
+                with self.lock:
+                    pending = list(self.pending)
+                concurrent.futures.wait(pending, timeout=DRAIN_SECONDS)
+            finally:
+                with self.lock:
+                    pending = list(self.pending)
+                for future in pending:
+                    future.cancel()
+                self.loop.call_soon_threadsafe(self.loop.stop)
+                self.thread.join(DRAIN_SECONDS)
+                # The runtime froze the heap after loading (gc.freeze), which
+                # also hides a VllmEngine's objects in this interpreter from
+                # the cycle collector.
+                gc.unfreeze()
     """;
 
   /** Cached {@code Vllm4jDecider} class, shared by every decider. */
@@ -116,7 +157,12 @@ public final class VllmDecider implements AutoCloseable {
 
   private final String model;
   private MemorySegment decider;
-  private volatile boolean closed = false;
+
+  /** Guards {@link #closed} and {@link #inFlight}. */
+  private final Object lifecycle = new Object();
+  private boolean closed = false;
+  /** Calls using {@link #decider}; {@link #close()} releases it at zero. */
+  private int inFlight = 0;
 
   /** Obtain via {@link #builder()}. */
   VllmDecider(Arena arena, VllmDeciderBuilder builder) {
@@ -171,7 +217,7 @@ public final class VllmDecider implements AutoCloseable {
    */
   @SuppressWarnings("unchecked")
   public Map<String, Object> decide(Map<String, Object> body) {
-    checkNotClosed();
+    enter();
     Object result;
     try (var gil = GIL.acquire(); Arena local = Arena.ofConfined()) {
       MemorySegment pyBody = PythonObjects.toPyDict(local, body);
@@ -183,9 +229,14 @@ public final class VllmDecider implements AutoCloseable {
       );
       PythonTypes.decref(name);
       PythonTypes.decref(pyBody);
-      PythonErrors.checkPythonError("decider.decide()");
-      result = PythonObjects.toJava(pyResult);
-      PythonTypes.decref(pyResult);
+      try {
+        PythonErrors.checkPythonError("decider.decide()");
+        result = PythonObjects.toJava(pyResult);
+      } finally {
+        PythonTypes.decref(pyResult);
+      }
+    } finally {
+      exit();
     }
     List<Object> outcome = (List<Object>) result;
     int status = ((Number) outcome.get(0)).intValue();
@@ -201,13 +252,11 @@ public final class VllmDecider implements AutoCloseable {
    * failure) or {@code failed}.
    */
   public String state() {
-    checkNotClosed();
     return (String) health().get(0);
   }
 
   /** Why the model is not ready, or {@code null}. */
   public String reason() {
-    checkNotClosed();
     return (String) health().get(1);
   }
 
@@ -216,19 +265,35 @@ public final class VllmDecider implements AutoCloseable {
     return model;
   }
 
-  /** Stops the runtime's scheduler and event loop. Idempotent. */
+  /**
+   * Stops the runtime's scheduler and event loop. Idempotent.
+   *
+   * <p>New calls are refused with {@link IllegalStateException}. Calls already
+   * waiting get their answer if the runtime gives it while stopping, or a
+   * {@link DecisionException} (503 {@code not_ready}) otherwise; this method
+   * returns once they have all returned.
+   */
   @Override
   public void close() {
-    if (closed) return;
-    closed = true;
-    try (var gil = GIL.acquire(); Arena local = Arena.ofConfined()) {
-      MemorySegment name = PythonTypes.pyStr(local, "close");
-      MemorySegment ignored = PythonCall.callMethodObjArgs(decider, name);
-      PythonTypes.decref(name);
-      PythonErrors.checkPythonError("decider.close()");
-      PythonTypes.decref(ignored);
-      PythonTypes.decref(decider);
-      decider = null;
+    synchronized (lifecycle) {
+      if (closed) return;
+      closed = true;
+    }
+    try {
+      // Without waiting for the calls in flight: they need the GIL to return.
+      try (var gil = GIL.acquire(); Arena local = Arena.ofConfined()) {
+        MemorySegment name = PythonTypes.pyStr(local, "close");
+        MemorySegment ignored = PythonCall.callMethodObjArgs(decider, name);
+        PythonTypes.decref(name);
+        PythonTypes.decref(ignored);
+        PythonErrors.checkPythonError("decider.close()");
+      }
+    } finally {
+      awaitNoCallInFlight();
+      try (var gil = GIL.acquire()) {
+        PythonTypes.decref(decider);
+        decider = null;
+      }
     }
   }
 
@@ -236,14 +301,54 @@ public final class VllmDecider implements AutoCloseable {
 
   @SuppressWarnings("unchecked")
   private List<Object> health() {
+    enter();
     try (var gil = GIL.acquire(); Arena local = Arena.ofConfined()) {
       MemorySegment name = PythonTypes.pyStr(local, "health");
       MemorySegment pyHealth = PythonCall.callMethodObjArgs(decider, name);
       PythonTypes.decref(name);
-      PythonErrors.checkPythonError("decider.health()");
-      List<Object> health = (List<Object>) PythonObjects.toJava(pyHealth);
-      PythonTypes.decref(pyHealth);
-      return health;
+      try {
+        PythonErrors.checkPythonError("decider.health()");
+        return (List<Object>) PythonObjects.toJava(pyHealth);
+      } finally {
+        PythonTypes.decref(pyHealth);
+      }
+    } finally {
+      exit();
+    }
+  }
+
+  /** Registers a call using {@link #decider}; refused once closed. */
+  private void enter() {
+    synchronized (lifecycle) {
+      if (closed) {
+        throw new IllegalStateException("VllmDecider is closed");
+      }
+      inFlight++;
+    }
+  }
+
+  private void exit() {
+    synchronized (lifecycle) {
+      if (--inFlight == 0) {
+        lifecycle.notifyAll();
+      }
+    }
+  }
+
+  /** Waits until no call uses {@link #decider}, keeping any interrupt. */
+  private void awaitNoCallInFlight() {
+    boolean interrupted = false;
+    synchronized (lifecycle) {
+      while (inFlight > 0) {
+        try {
+          lifecycle.wait();
+        } catch (InterruptedException e) {
+          interrupted = true;
+        }
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
     }
   }
 
@@ -307,12 +412,6 @@ public final class VllmDecider implements AutoCloseable {
       }
       shimClass = cls;
       return cls;
-    }
-  }
-
-  private void checkNotClosed() {
-    if (closed) {
-      throw new IllegalStateException("VllmDecider is closed");
     }
   }
 }

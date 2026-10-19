@@ -26,9 +26,11 @@ import java.util.Map;
  * about it. Answers come back under the same names, in the same order.
  *
  * <pre>{@code
+ * Map<String, String> intents = new LinkedHashMap<>();   // options keep their order
+ * intents.put("billing", "Payment or invoice issue");
+ * intents.put("account", "Login or access issue");
  * var request = DecisionRequest.builder(Map.of("request", userMessage))
- *     .choice("intent", "What does the user want?",
- *         Map.of("billing", "Payment or invoice issue", "account", "Login or access issue"))
+ *     .choice("intent", "What does the user want?", intents)
  *     .noul("upset", "Is the user upset?")
  *     .score("urgency", "How urgent is it?", List.of("Not urgent", "Somewhat urgent", "Urgent"))
  *     .image("data:image/png;base64,...") // Decision 3.0 only

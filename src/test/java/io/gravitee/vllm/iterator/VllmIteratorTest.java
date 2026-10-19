@@ -451,6 +451,49 @@ class VllmIteratorTest {
   // ═══════════════════════════════════════════════════════════════════
 
   @Test
+  void streamed_steps_carry_their_own_token_ids_and_logprobs() {
+    String prompt = renderPrompt(SYSTEM, "What is the capital of Mexico?");
+    List<Integer> labels = List.of(
+      engine.encode("A", false).getFirst(),
+      engine.encode("B", false).getFirst()
+    );
+
+    try (
+      var sp = new SamplingParams(engine.arena())
+        .temperature(0.0)
+        .maxTokens(8)
+        .logprobTokenIds(labels)
+    ) {
+      var iterator = new VllmIterator(engine);
+      iterator.addRequest(new VllmRequest("req-lp-stream", prompt, sp));
+      List<VllmOutput> outputs = iterator.stream().toList();
+
+      var withTokens = outputs
+        .stream()
+        .filter(o -> !o.tokenIds().isEmpty())
+        .toList();
+      // Every generated token is reported once, by the step that made it:
+      // the steps' ids, joined, decode to the streamed text.
+      assertThat(withTokens.size()).isGreaterThan(1);
+      List<Integer> allIds = withTokens
+        .stream()
+        .flatMap(o -> o.tokenIds().stream())
+        .toList();
+      String text = outputs
+        .stream()
+        .map(VllmOutput::delta)
+        .collect(Collectors.joining());
+      assertThat(engine.decode(allIds)).contains(text.strip());
+      for (VllmOutput output : withTokens) {
+        assertThat(output.logprobs()).hasSameSizeAs(output.tokenIds());
+        for (var position : output.logprobs()) {
+          assertThat(position).containsKeys(labels.toArray(Integer[]::new));
+        }
+      }
+    }
+  }
+
+  @Test
   void logprobs_should_be_extracted() {
     String prompt = renderPrompt(SYSTEM, "What is the capital of Mexico?");
 
