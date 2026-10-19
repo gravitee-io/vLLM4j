@@ -255,6 +255,60 @@ public final class PythonTypes {
     }
   }
 
+  // ── Type checks ────────────────────────────────────────────────────────
+
+  /** Lazily resolved MethodHandle for {@code PyObject_IsInstance}. */
+  private static volatile MethodHandle pyObjectIsInstanceHandle;
+
+  /**
+   * Returns {@code isinstance(obj, type)}.
+   *
+   * <p>{@code PyObject_IsInstance} is not included in the filtered jextract
+   * output. We resolve it lazily via {@link SymbolLookup} and cache the
+   * {@link MethodHandle}.
+   *
+   * @param obj  the object (borrowed)
+   * @param type the class or tuple of classes (borrowed)
+   * @throws VllmException if the check raised
+   */
+  public static boolean isInstance(MemorySegment obj, MemorySegment type) {
+    if (pyObjectIsInstanceHandle == null) {
+      synchronized (PythonTypes.class) {
+        if (pyObjectIsInstanceHandle == null) {
+          var addr = SymbolLookup.loaderLookup()
+            .or(Linker.nativeLinker().defaultLookup())
+            .find("PyObject_IsInstance")
+            .orElseThrow(() ->
+              new VllmException(
+                "Cannot locate PyObject_IsInstance in libpython"
+              )
+            );
+          var desc = FunctionDescriptor.of(
+            ValueLayout.JAVA_INT, // int return: 1, 0 or -1 on error
+            ValueLayout.ADDRESS, // PyObject* inst
+            ValueLayout.ADDRESS // PyObject* cls
+          );
+          pyObjectIsInstanceHandle = Linker.nativeLinker().downcallHandle(
+            addr,
+            desc
+          );
+        }
+      }
+    }
+    int result;
+    try {
+      result = (int) pyObjectIsInstanceHandle.invokeExact(obj, type);
+    } catch (Error | RuntimeException ex) {
+      throw ex;
+    } catch (Throwable t) {
+      throw new VllmException("PyObject_IsInstance failed", t);
+    }
+    if (result < 0) {
+      PythonErrors.checkPythonError("isinstance()");
+    }
+    return result == 1;
+  }
+
   // ── Internal ───────────────────────────────────────────────────────────
 
   /** Obtains a Python builtin singleton (None, True, False) as a new reference. */

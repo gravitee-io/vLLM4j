@@ -421,6 +421,47 @@ public final class SamplingParams implements AutoCloseable, Freeable {
   }
 
   /**
+   * Returns the log probabilities of exactly these tokens at each output
+   * position, in place of the top {@link #logprobs(int)}: a classifier reads
+   * its label tokens even when they are not among the most likely ones. At
+   * most 128 ids, each inside the vocabulary.
+   *
+   * <p>They are raw log probabilities over the whole vocabulary unless the
+   * engine sets another {@code logprobs_mode}, so a softmax over them equals
+   * a softmax over the logits of those tokens.
+   *
+   * @param tokenIds the token IDs to report
+   * @return this
+   */
+  public SamplingParams logprobTokenIds(int... tokenIds) {
+    checkNotBuilt();
+    try (var gil = GIL.acquire()) {
+      MemorySegment pyList = CPythonBinding.PyList_New(0);
+      for (int id : tokenIds) {
+        MemorySegment pyInt = CPythonBinding.PyLong_FromLong(id);
+        CPythonBinding.PyList_Append(pyList, pyInt);
+        PythonTypes.decref(pyInt);
+      }
+      PythonTypes.putDictObj(arena, kwargs, "logprob_token_ids", pyList);
+      PythonTypes.decref(pyList);
+    }
+    return this;
+  }
+
+  /**
+   * Returns the log probabilities of exactly these tokens at each output
+   * position; see {@link #logprobTokenIds(int...)}.
+   *
+   * @param tokenIds the token IDs to report
+   * @return this
+   */
+  public SamplingParams logprobTokenIds(List<Integer> tokenIds) {
+    return logprobTokenIds(
+      tokenIds.stream().mapToInt(Integer::intValue).toArray()
+    );
+  }
+
+  /**
    * Sets the number of top log probabilities to return per prompt token.
    *
    * @param n number of prompt logprobs (0 to disable)
