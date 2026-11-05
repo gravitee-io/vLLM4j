@@ -29,7 +29,7 @@
 # Usage:
 #   ./vllm_metal_wheel_url.sh -v <vllm_version> [-p <python_version>]
 #
-#   -v  vLLM version (e.g. 0.31.0)
+#   -v  vLLM version (e.g. 0.33.0rc3)
 #   -p  Python version the wheel is built for (default: 3.12)
 #
 # The URL goes to stdout, diagnostics to stderr. The releases are public, so
