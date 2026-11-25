@@ -221,6 +221,7 @@ public final class PythonRuntime implements AutoCloseable {
     boolean alreadyInitialized = INITIALIZED.get();
 
     if (!alreadyInitialized) {
+      enableUtf8Mode();
       // First init — Py_InitializeEx implicitly acquires the GIL on this thread.
       CPythonBinding.Py_InitializeEx(0);
       INITIALIZED.set(true);
@@ -626,6 +627,37 @@ public final class PythonRuntime implements AutoCloseable {
       ? pathPrefix.toString()
       : pathPrefix + sep + current;
     setEnv("PATH", updated);
+  }
+
+  /**
+   * Turns on Python's UTF-8 mode (PEP 540) for the embedded interpreter,
+   * unless {@code PYTHONUTF8=0} opts out.
+   *
+   * <p>The python executable switches to UTF-8 mode on its own under a C/POSIX
+   * locale, but {@code Py_InitializeEx} runs CPython's legacy "compat"
+   * configuration, which disables that coercion and ignores {@code PYTHONUTF8}.
+   * Under the JVM's default C locale the preferred encoding is then ASCII, and
+   * every {@code open()}/{@code read_text()} without an explicit encoding fails
+   * on the first non-ASCII byte: vllm-metal 0.34.0 reads its Metal kernel
+   * sources that way, so engine init dies with
+   * {@code 'ascii' codec can't decode byte 0xe2}. The compat configuration
+   * does honour the {@code Py_UTF8Mode} global, so set it directly.
+   *
+   * <p>Must be called before {@code Py_InitializeEx}.
+   */
+  private static void enableUtf8Mode() {
+    if ("0".equals(System.getenv("PYTHONUTF8"))) {
+      return;
+    }
+    var addr = java.lang.foreign.SymbolLookup.loaderLookup()
+      .or(Linker.nativeLinker().defaultLookup())
+      .find("Py_UTF8Mode")
+      .orElseThrow(() ->
+        new VllmException("Cannot locate Py_UTF8Mode in libpython")
+      );
+    addr
+      .reinterpret(ValueLayout.JAVA_INT.byteSize())
+      .set(ValueLayout.JAVA_INT, 0, 1);
   }
 
   /**
